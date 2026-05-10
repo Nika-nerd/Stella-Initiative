@@ -1,0 +1,14 @@
+bin/
+obj/
+*.user
+*.slnx
+docker-compose.yml
+
+.vscode/
+.idea/
+*.swp
+
+stella_data/
+
+
+.DS_Store

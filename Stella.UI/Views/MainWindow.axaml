@@ -1,0 +1,26 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        x:Class="Stella.UI.Views.MainWindow"
+        Title="Stella" Background="#1E1E1E" RequestedThemeVariant="Dark"
+        Width="800" Height="600">
+
+    <Grid RowDefinitions="Auto, *, Auto" Margin="20">
+        <StackPanel Grid.Row="0" Spacing="10">
+            <TextBlock Text="🌟 Stella Project" FontSize="24" Foreground="#61AFEF"/>
+            
+            <TextBox Name="InputBox" 
+                     Height="80" Watermark="Введите задачу..."/>
+            
+            <Button Name="GenButton" 
+                    Content="Сгенерировать" 
+                    HorizontalAlignment="Stretch"/>
+        </StackPanel>
+
+        <Border Grid.Row="1" Margin="0,20,0,0" Background="#282C34">
+            <ScrollViewer>
+                <SelectableTextBlock Name="OutputBlock" 
+                                     Padding="15" Foreground="#DCDCAA"/>
+            </ScrollViewer>
+        </Border>
+    </Grid>
+</Window>
