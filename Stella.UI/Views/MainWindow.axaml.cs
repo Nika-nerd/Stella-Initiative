@@ -1,9 +1,9 @@
 using Avalonia.Controls;
-using System.Reactive.Linq;
-using System.Reactive.Threading.Tasks;
 using Avalonia.Interactivity;
 using Stella.UI.ViewModels;
-using System;
+using System.Threading.Tasks;
+using Avalonia.Input.Platform;
+
 
 namespace Stella.UI.Views;
 
@@ -14,32 +14,37 @@ public partial class MainWindow : Window
         InitializeComponent();
     }
 
-   
-    protected override void OnDataContextChanged(EventArgs e)
+    private void OnGenButtonClick(object sender, RoutedEventArgs e)
     {
-        base.OnDataContextChanged(e);
-
         if (DataContext is MainWindowViewModel vm)
         {
            
-            var genButton = this.FindControl<Button>("GenButton");
-            if (genButton != null)
-            {
-                genButton.Click += async (s, e) => 
-                {
-                    var inputBox = this.FindControl<TextBox>("InputBox");
-                    var outputBlock = this.FindControl<SelectableTextBlock>("OutputBlock");
+            Task.Run(() => vm.StartGenerationProcess());
+        }
+    }
+    
+    private async void OnCopyButtonClick(object sender, RoutedEventArgs e)
+    {
+        if (DataContext is MainWindowViewModel vm)
+        {
+            var pureCode = typeof(MainWindowViewModel)
+                .GetMethod("ExtractCode", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)
+                ?.Invoke(vm, new object[] {vm.GeneratedCode ?? ""}) as string;
 
-                    if (inputBox != null && outputBlock != null)
-                    {
-                        vm.UserPrompt = inputBox.Text;
-                        outputBlock.Text = "⏳ Стелла думает...";
-                        
-                        await vm.GenerateCommand.Execute();
-                        
-                        outputBlock.Text = vm.GeneratedCode;
-                    }
-                };
+            if (!string.IsNullOrEmpty(pureCode))
+            {
+                var clipBoard = TopLevel.GetTopLevel(this)?.Clipboard;
+                await clipBoard.SetTextAsync(pureCode);
+
+                if (sender is Button btn)
+                {
+                    var oldContent = btn.Content;
+
+                    btn.Content = "Скопировано!";
+                    
+                    await Task.Delay(1500);
+                    btn.Content = oldContent;
+                }
             }
         }
     }

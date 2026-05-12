@@ -4,7 +4,7 @@ namespace Stella.Core.Interfaces;
 
 public interface ICodeValidator
 {
-    Task<CompilationResult> ValidateAsync(string code);
+    Task<CodeValidationResult> ValidateAsync(string code, CancellationToken ct =  default);
 }
 
 

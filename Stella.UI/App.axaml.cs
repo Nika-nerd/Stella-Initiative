@@ -25,15 +25,20 @@ public partial class App : Application
 
         services.AddHttpClient<ILLMService, OllamaChatService>();
 
+        services.AddSingleton<ICodeValidator, DockerValidationService>();
+
         services.AddSingleton<MainWindowViewModel>();
         
         var serviceProvider = services.BuildServiceProvider();
 
         if (ApplicationLifetime is IClassicDesktopStyleApplicationLifetime desktop)
         {
+            var viewModel = serviceProvider.GetRequiredService<MainWindowViewModel>();
+            
+            
             desktop.MainWindow = new MainWindow
             {
-                DataContext = serviceProvider.GetRequiredService<MainWindowViewModel>()
+                DataContext = viewModel
             };
         }
         base.OnFrameworkInitializationCompleted();
