@@ -59,22 +59,29 @@ public class DockerValidationService : ICodeValidator
         {
             try 
             {
-                using var doc = JsonDocument.Parse(line);
+                if(!line.Trim().StartsWith("{")) continue;
+
+                using var doc =  JsonDocument.Parse(line);
                 var root = doc.RootElement;
 
-                
-                if (root.TryGetProperty("message", out var msgElement))
+                if (root.TryGetProperty("level", out var LevelProp))
                 {
-                    string message = msgElement.GetString() ?? "";
-                    string level = root.GetProperty("level").GetString() ?? "note";
+                    string level = LevelProp.GetString() ?? "";
                     
+                    if(level != "error") continue;
+
+                    string message = root.TryGetProperty("message", out var msg) ? msg.GetString() : "Unknown error";
+
+                    if (root.TryGetProperty("rendered", out var rendered))
+                    {
+                        message = rendered.GetString();
+                    }
                     
                     int? lineNum = null;
                     if (root.TryGetProperty("spans", out var spans) && spans.GetArrayLength() > 0)
                     {
                         lineNum = spans[0].GetProperty("line_start").GetInt32();
                     }
-
                     issues.Add(new ValidationIssue(level, message, lineNum, 0));
                 }
             }

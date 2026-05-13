@@ -17,6 +17,7 @@
            
             <Button Name="GenButton" 
                    Click="OnGenButtonClick"
+                   IsEnabled="{Binding !IsBusy}"
                     Content="Сгенерировать" 
                     HorizontalAlignment="Stretch"/>
         </StackPanel>

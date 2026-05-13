@@ -1,5 +1,5 @@
 ﻿using System;
-using System.Runtime.CompilerServices;
+using System.Linq;
 using System.Threading.Tasks;
 using ReactiveUI;
 using Stella.Core.Interfaces;
@@ -14,6 +14,9 @@ public class MainWindowViewModel : ViewModelBase
     private string? _userPrompt = string.Empty;
     private string? _generatedCode = "Введите запрос и нажмите 'Сгенерировать'";
     private string? _validationStatus = string.Empty;
+    private bool _isBusy;
+    public bool IsBusy { get => _isBusy; set => this.RaiseAndSetIfChanged(ref _isBusy, value); }
+
 
     public string? ValidationStatus { get => _validationStatus; set => this.RaiseAndSetIfChanged(ref _validationStatus, value); }
     public string? UserPrompt { get => _userPrompt; set => this.RaiseAndSetIfChanged(ref _userPrompt, value); }
@@ -25,10 +28,10 @@ public class MainWindowViewModel : ViewModelBase
         _validator = validator;
     }
 
-  
+    
     public async Task StartGenerationProcess()
     {
-        if (string.IsNullOrWhiteSpace(UserPrompt)) return;
+        if (string.IsNullOrWhiteSpace(UserPrompt) || IsBusy) return;
 
         
         Dispatcher.UIThread.Post(() => {
@@ -36,7 +39,7 @@ public class MainWindowViewModel : ViewModelBase
             ValidationStatus = "⏳ Проверка запущена...";
         });
 
-        try 
+        try
         {
             var response = await _llmService.GenerateCodeAsync(UserPrompt, "default");
             var code = ExtractCode(response);
@@ -44,31 +47,59 @@ public class MainWindowViewModel : ViewModelBase
 
             Dispatcher.UIThread.Post(() =>
             {
-                GeneratedCode = code;
-                ValidationStatus = result.IsSuccess 
-                    ? "✅ Код валиден" 
-                    : $"❌ Найдено ошибок: {result.Issues.Count}";
+                GeneratedCode = response;
+                if (result.IsSuccess)
+                {
+                    ValidationStatus = "Код валиден";
+                }
+                else
+                {
+                    var firstError = result.Issues.FirstOrDefault()?.Message ?? "Неизвестная ошибка";
+
+                    ValidationStatus = $"Ошибок: {result.Issues.Count}. Первая: {firstError}";
+                }
             });
         }
         catch (Exception ex)
         {
-            Dispatcher.UIThread.Post(() => {
+            Dispatcher.UIThread.Post(() =>
+            {
                 GeneratedCode = $"❌ Ошибка: {ex.Message}";
                 ValidationStatus = "🚨 Сбой";
             });
+        }
+
+        finally
+        {
+            Dispatcher.UIThread.Post(() => IsBusy =  false);
         }
     }
 
     private string ExtractCode(string markdown)
     {
         if (string.IsNullOrWhiteSpace(markdown)) return "";
-        string tag = "```rust";
-        if (markdown.Contains(tag))
+        string startTag = "```rust";
+        int startIndex = markdown.IndexOf(startTag);
+        if (startIndex == -1)
         {
-            var start = markdown.IndexOf(tag) + tag.Length;
-            var end = markdown.IndexOf(" ```", start);
-            if (end > start) return markdown.Substring(start, end - start).Trim();
+            startTag = "``";
+            startIndex = markdown.IndexOf(startTag);
         }
+
+        if (startIndex != -1)
+        {
+            int codeStart = startIndex + startTag.Length;
+            
+            int endIndex = markdown.IndexOf("```", codeStart);
+
+            if (endIndex > codeStart)
+            {
+                return markdown.Substring(codeStart, endIndex - codeStart).Trim();
+            }
+        }
+        
         return markdown.Trim();
     }
+    
+    
 }
