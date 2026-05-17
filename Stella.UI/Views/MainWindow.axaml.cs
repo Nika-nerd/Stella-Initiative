@@ -27,23 +27,22 @@ public partial class MainWindow : Window
     {
         if (DataContext is MainWindowViewModel vm)
         {
-            var pureCode = typeof(MainWindowViewModel)
-                .GetMethod("ExtractCode", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)
-                ?.Invoke(vm, new object[] {vm.GeneratedCode ?? ""}) as string;
+            var pureCode = vm.ExtractCode(vm.GeneratedCode ?? "");
 
             if (!string.IsNullOrEmpty(pureCode))
             {
                 var clipBoard = TopLevel.GetTopLevel(this)?.Clipboard;
-                await clipBoard.SetTextAsync(pureCode);
-
-                if (sender is Button btn)
+                if (clipBoard != null)
                 {
-                    var oldContent = btn.Content;
+                    await clipBoard.SetTextAsync(pureCode);
 
-                    btn.Content = "Скопировано!";
-                    
-                    await Task.Delay(1500);
-                    btn.Content = oldContent;
+                    if (sender is Button btn)
+                    {
+                        var oldContent = btn.Content;
+                        btn.Content = "Скопировано!";
+                        await Task.Delay(1500);
+                        btn.Content = oldContent;
+                    }
                 }
             }
         }

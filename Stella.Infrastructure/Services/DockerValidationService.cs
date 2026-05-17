@@ -12,56 +12,60 @@ public class DockerValidationService : ICodeValidator
     private const string ImageName = "rust:1.78-slim"; 
 
     public async Task<CodeValidationResult> ValidateAsync(string code, CancellationToken ct = default)
+{
+    
+    string homeDir = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+    string tempDir = Path.Combine(homeDir, ".stella", "temp", $"project_{Guid.NewGuid()}");
+    Directory.CreateDirectory(tempDir);
+
+    try
     {
+        await PrepareCargoProject(tempDir, code, ct);
+
         
-        string tempDir = Path.Combine(Path.GetTempPath(), $"stella_project_{Guid.NewGuid()}");
-        Directory.CreateDirectory(tempDir);
+        string dockerArgs = $"run --rm -v \"{tempDir}\":/usr/src/myapp -w /usr/src/myapp {ImageName} " +
+                            "sh -c \"rustup component add clippy rustfmt > /dev/null 2>&1 " +
+                            "&& rustfmt src/main.rs " + 
+                            "&& cargo clippy --fix --allow-dirty --allow-no-vcs > /dev/null 2>&1 " + 
+                            "&& cargo clippy --message-format=json -- -D warnings -D clippy::pedantic " +
+                            "&& cargo test --message-format=json\"";
 
-        try
+        var startInfo = new ProcessStartInfo
         {
-            
-            await PrepareCargoProject(tempDir, code, ct);
+            FileName = "docker", 
+            Arguments = dockerArgs,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            CreateNoWindow = true
+        };
 
-            
-            string dockerArgs = $"run --rm -v \"{tempDir}\":/usr/src/myapp -w /usr/src/myapp {ImageName} " +
-                                "sh -c \"rustup component add clippy rustfmt > /dev/null 2>&1 " +
-                                "&& rustfmt src/main.rs " + 
-                                "&& cargo clippy --message-format=json\"";
+        using var process = Process.Start(startInfo);
+    
+        string output = await process.StandardOutput.ReadToEndAsync(ct);
+        await process.WaitForExitAsync(ct);
 
-
-            if (File.Exists(Path.Combine(tempDir, "src/main.rs")))
-            {
-                
-                string formattedCode = await File.ReadAllTextAsync(Path.Combine(tempDir, "src/main.rs"), ct);
-            
-            }
-            
-            
-            var startInfo = new ProcessStartInfo
-            {
-                FileName = "docker", 
-                Arguments = dockerArgs,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                UseShellExecute = false,
-                CreateNoWindow = true
-            };
-
-            using var process = Process.Start(startInfo);
-            
-            string output = await process.StandardOutput.ReadToEndAsync(ct);
-            await process.WaitForExitAsync(ct);
-
-            return ParseCargoErrors(output);
+    
+        string? updatedCode = null;
+        string mainRsPath = Path.Combine(tempDir, "src", "main.rs");
+        if (File.Exists(mainRsPath))
+        {
+            updatedCode = await File.ReadAllTextAsync(mainRsPath, ct);
         }
-        finally
+
+        var validationResult = ParseCargoErrors(output);
+        
+       
+        return new CodeValidationResult(validationResult.IsSuccess, validationResult.RawOutput, validationResult.Issues, updatedCode);
+    }
+    finally
+    {
+        if (Directory.Exists(tempDir))
         {
-            if (Directory.Exists(tempDir))
-            {
-                try { Directory.Delete(tempDir, true); } catch {  }
-            }
+            try { Directory.Delete(tempDir, true); } catch {  }
         }
     }
+}
 
     private async Task PrepareCargoProject(string path, string code, CancellationToken ct)
     {
@@ -92,39 +96,65 @@ public class DockerValidationService : ICodeValidator
     }
 
     private CodeValidationResult ParseCargoErrors(string rawJson)
+{
+    var issues = new List<ValidationIssue>();
+    var lines = rawJson.Split('\n', StringSplitOptions.RemoveEmptyEntries);
+
+    foreach (var line in lines)
     {
-        var issues = new List<ValidationIssue>();
-        var lines = rawJson.Split('\n', StringSplitOptions.RemoveEmptyEntries);
-
-        foreach (var line in lines)
+        try 
         {
-            try 
-            {
-                using var doc = JsonDocument.Parse(line);
-                var root = doc.RootElement;
+            using var doc = JsonDocument.Parse(line);
+            var root = doc.RootElement;
 
-               
-                if (root.TryGetProperty("reason", out var reason) && reason.GetString() == "compiler-message")
+            
+            if (root.TryGetProperty("reason", out var reason) && reason.GetString() == "compiler-message")
+            {
+                var messageNode = root.GetProperty("message");
+                string level = messageNode.GetProperty("level").GetString() ?? "warning";
+                string message = messageNode.GetProperty("message").GetString() ?? "";
+                
+                int? lineNum = null;
+                var spans = messageNode.GetProperty("spans");
+                if (spans.GetArrayLength() > 0)
                 {
-                    var messageNode = root.GetProperty("message");
-                    string level = messageNode.GetProperty("level").GetString() ?? "warning";
-                    string message = messageNode.GetProperty("message").GetString() ?? "";
+                    lineNum = spans[0].GetProperty("line_start").GetInt32();
+                }
+
+                issues.Add(new ValidationIssue(level, message, lineNum, 0));
+            }
+            
+            
+            if (root.TryGetProperty("event", out var testEvent) && testEvent.GetString() == "failed")
+            {
+                if (root.TryGetProperty("name", out var testName))
+                {
+                    string name = testName.GetString() ?? "unknown_test";
+                    string stdout = string.Empty;
                     
-                    int? lineNum = null;
-                    var spans = messageNode.GetProperty("spans");
-                    if (spans.GetArrayLength() > 0)
+                    if (root.TryGetProperty("stdout", out var testStdout))
                     {
-                        lineNum = spans[0].GetProperty("line_start").GetInt32();
+                        stdout = testStdout.GetString() ?? "";
                     }
 
-                    issues.Add(new ValidationIssue(level, message, lineNum, 0));
+                    string shortReason = !string.IsNullOrWhiteSpace(stdout) 
+                        ? stdout.Split('\n').FirstOrDefault(l => l.Contains("panicked at")) ?? "Test panicked"
+                        : "Assertion failed";
+
+                    issues.Add(new ValidationIssue(
+                        "error", 
+                        $"Unit test '{name}' FAILED: {shortReason.Trim()}", 
+                        null, 
+                        null
+                    ));
                 }
             }
-            catch {  }
         }
-
-        
-        bool isSuccess = !issues.Any(i => i.Severity.ToLower() == "error" || i.Severity.ToLower() == "warning");
-        return new CodeValidationResult(isSuccess, rawJson, issues);
+        catch {  }
     }
+
+    
+    bool isSuccess = !issues.Any(i => i.Severity.ToLower() == "error");
+    return new CodeValidationResult(isSuccess, rawJson, issues);
+}
 }

@@ -1,3 +1,4 @@
+using System;
 using Avalonia;
 using Avalonia.Controls.ApplicationLifetimes;
 using Avalonia.Data.Core;
@@ -23,7 +24,10 @@ public partial class App : Application
     {
         var services = new ServiceCollection();
 
-        services.AddHttpClient<ILLMService, OllamaChatService>();
+        services.AddHttpClient<ILLMService, OllamaChatService>(client =>
+        {
+            client.Timeout = TimeSpan.FromMinutes(5);
+        });
 
         services.AddSingleton<ICodeValidator, DockerValidationService>();
 

@@ -8,4 +8,4 @@ public record ValidationIssue(string Severity,
     public record CodeValidationResult(
         bool IsSuccess,
         string RawOutput,
-        List<ValidationIssue> Issues);
+        List<ValidationIssue> Issues, string? UpdatedCode = null);
