@@ -50,156 +50,136 @@ public class MainWindowViewModel : ViewModelBase
     }
 
     public async Task StartGenerationProcess()
+{
+    if (string.IsNullOrWhiteSpace(UserPrompt) || IsBusy) return;
+
+    IsBusy = true;
+    int maxAttempts = 3;
+    int currentAttempt = 0;
+    string? lastCode = null;
+
+    string lastErrorsReport = string.Empty;
+    var failedCodeAttempts = new List<string>();
+    
+    bool forceAlternativeStrategy = false; 
+
+    try
     {
-        if (string.IsNullOrWhiteSpace(UserPrompt) || IsBusy) return;
-
-        IsBusy = true;
-        int maxAttempts = 5;
-        int currentAttempt = 0;
-        string? lastCode = null;
-
-       
-        string lastErrorsReport = string.Empty;
-        string lastSmartHints = string.Empty;
-
-        try
+        while (currentAttempt < maxAttempts)
         {
-            while (currentAttempt < maxAttempts)
+            currentAttempt++;
+            
+            double targetTemperature = currentAttempt == 1 ? 0.0 : 0.2 + (currentAttempt * 0.15);
+            if (forceAlternativeStrategy) targetTemperature = Math.Min(targetTemperature + 0.2, 0.95);
+
+            UpdateStatus($"⏳ Попытка {currentAttempt}/{maxAttempts} (Temp: {targetTemperature:F2})...");
+            await Task.Delay(100);
+            
+            var iterationPromptBuilder = new StringBuilder();
+
+            if (currentAttempt == 1)
             {
-                currentAttempt++;
-                UpdateStatus($"⏳ Попытка {currentAttempt} из {maxAttempts}...");
+                iterationPromptBuilder.AppendLine($"Initial Task: {UserPrompt}");
+            }
+            else
+            {
+                iterationPromptBuilder.AppendLine($"Task: {UserPrompt}\n");
+                iterationPromptBuilder.AppendLine("CRITICAL: Your previous implementation is completely wrong and fails Rust validation.");
                 
-                await Task.Delay(100);
-                
-                var iterationPromptBuilder =  new StringBuilder();
-
-                if (currentAttempt > 1)
+                if (forceAlternativeStrategy)
                 {
-                    GeneratedCode =
-                        $"/* [АГЕНТ СТЕЛЛА]: Попытка {currentAttempt}. Пересборка контекста и исправление Clippy...*/\n\n" +
-                        GeneratedCode;
+                    iterationPromptBuilder.AppendLine("![WARNING]: YOU ARE STUCK IN A LOOP. Do NOT write the code the same way. Destroy your previous structural approach and rewrite it using completely different Rust language features!");
+                    forceAlternativeStrategy = false; 
                 }
 
+                iterationPromptBuilder.AppendLine("=== CURRENT WRONG CODE ===");
+                iterationPromptBuilder.AppendLine(lastCode);
+                iterationPromptBuilder.AppendLine("==========================\n");
+
+                iterationPromptBuilder.AppendLine("=== COMPILER ERRORS ===");
+                iterationPromptBuilder.AppendLine(lastErrorsReport);
+                iterationPromptBuilder.AppendLine("\nInstruction: Fix the exact lines with errors. Return the FULL updated file inside ```rust ...```.");
+            }
+            
+            System.Diagnostics.Debug.WriteLine($"\n================[ПОПЫТКА {currentAttempt} | TEMP: {targetTemperature}]==============");
+
+            var response = await _llmService.GenerateCodeAsync(iterationPromptBuilder.ToString(), "default", currentAttempt, targetTemperature);
+            var newCode = ExtractCode(response);
+
+            if (string.IsNullOrWhiteSpace(newCode))
+            {
+                UpdateStatus("⚠️ Модель выдала пустой код.");
+                break;
+            }
+
+            if (failedCodeAttempts.Contains(newCode) || newCode == lastCode)
+            {
+                System.Diagnostics.Debug.WriteLine($"[ПЕРЕХВАТ ПЕТЛИ]: Модель выдала дубликат. Форсируем хаос.");
+                forceAlternativeStrategy = true;
                 
-                
-
-                if (currentAttempt == 1)
+                if (currentAttempt < maxAttempts)
                 {
-                    iterationPromptBuilder.AppendLine($"Initial Task: {UserPrompt}");
+                    currentAttempt--; 
+                    lastErrorsReport += "\n- Ошибка: Ты вернула точную копию предыдущего ошибочного кода! Измени логику!";
+                    continue;
                 }
-                else
+                UpdateStatus($"⚠️ Тупик. Модель не смогла выйти из цикла.");
+                break;
+            }
+
+            lastCode = newCode;
+            GeneratedCode = response; 
+
+            UpdateStatus($"🔍 Проверка кода компилятором (попытка {currentAttempt})...");
+            var result = await _validator.ValidateAsync(newCode);
+            
+            if (!string.IsNullOrEmpty(result.UpdatedCode) && result.UpdatedCode != lastCode)
+            {
+                lastCode = result.UpdatedCode;
+                string planPrefix = response.Contains("/*") && response.IndexOf("*/") > 0 
+                    ? response.Substring(0, response.IndexOf("*/") + 2) + "\n\n" 
+                    : "";
+                GeneratedCode = planPrefix + "```rust\n" + lastCode + "\n```";
+            }
+
+            if (result.IsSuccess && result.Issues.Count == 0)
+            {
+                UpdateStatus("✅ Код успешно скомпилирован!");
+                break;
+            }
+
+            failedCodeAttempts.Add(newCode);
+
+            var errorsFeedBuilder = new StringBuilder();
+            string[] codeLines = lastCode.Split(new[] { "\r\n", "\n" }, StringSplitOptions.None);
+
+            foreach (var issue in result.Issues.Take(4))
+            {
+                errorsFeedBuilder.AppendLine($"-> [{issue.Severity.ToUpper()}] Линия {issue.Line}: {issue.Message}");
+                if (issue.Line.HasValue && issue.Line.Value > 0 && issue.Line.Value <= codeLines.Length)
                 {
-                    
-                    iterationPromptBuilder.AppendLine($"Task: {UserPrompt}\n");
-                    iterationPromptBuilder.AppendLine("CRITICAL: Your previous code failed validation. You must refactor it based on the compiler/clippy report below.");
-                    iterationPromptBuilder.AppendLine("=== CURRENT CODE TO FIX ===");
-                    iterationPromptBuilder.AppendLine($"```rust\n{lastCode}\n ```\n");
-                    iterationPromptBuilder.AppendLine("=== COMPILER & CLIPPY REPORT ===");
-                    iterationPromptBuilder.AppendLine(lastErrorsReport);
-                    
-                    if (!string.IsNullOrEmpty(lastSmartHints))
-                    {
-                        iterationPromptBuilder.AppendLine($"\n[KNOWLEDGE BASE ADVICE]:\n{lastSmartHints}");
-                    }
-                    iterationPromptBuilder.AppendLine("\nInstruction: Locate the exact 'Context Line Code' failing inside your file. Fix it. Do NOT rewrite the entire architecture from scratch if it's correct. Modify ONLY what causes the errors.");
-                }
-                
-                System.Diagnostics.Debug.WriteLine($"\n================[ПОПЫТКА {currentAttempt}]==============");
-                System.Diagnostics.Debug.WriteLine($"[ПРОМПТ]: \n{iterationPromptBuilder}");
-
-                
-                var response = await _llmService.GenerateCodeAsync(iterationPromptBuilder.ToString(), "default", currentAttempt);
-                System.Diagnostics.Debug.WriteLine($"[ОТВЕТ LLM]: \n{response}");
-                var newCode = ExtractCode(response);
-
-                if (string.IsNullOrWhiteSpace(newCode))
-                {
-                    UpdateStatus("⚠️ Модель выдала пустой код. Прерывание.");
-                    break;
-                }
-
-                if (newCode == lastCode)
-                {
-                    System.Diagnostics.Debug.WriteLine($"[ВЫХОД]: Цикл прерван! Модель выдала ТОЧНО ТАКОЙ ЖЕ код, как на прошлом шаге (Зацикливание).");
-                        
-                    UpdateStatus($"⚠️ Тупик на попытке {currentAttempt}. Модель зациклилась.");
-                    break;
-                }
-
-                lastCode = newCode;
-                GeneratedCode = response; 
-
-                UpdateStatus($"🔍 Валидация и Авто-исправление кода (попытка {currentAttempt})...");
-                var result = await _validator.ValidateAsync(newCode);
-                
-                System.Diagnostics.Debug.WriteLine($"[РЕЗУЛЬТАТ ВАЛИДАЦИИ]: Успех сборки = {result.IsSuccess}, Всего замечний Clippy/Тестов = {result.Issues.Count}");
-                foreach (var issue in result.Issues)
-                {
-                    System.Diagnostics.Debug.WriteLine($"-> [{issue.Severity}] Line {issue.Line}: {issue.Message}");
-                }
-
-                
-                if (!string.IsNullOrEmpty(result.UpdatedCode) && result.UpdatedCode != lastCode)
-                {
-                    lastCode = result.UpdatedCode;
-                    
-                    
-                    string planPrefix = response.Contains("/*") && response.IndexOf("*/") > 0 
-                        ? response.Substring(0, response.IndexOf("*/") + 2) + "\n\n" 
-                        : "";
-                    GeneratedCode = planPrefix + "```rust\n" + lastCode + "\n```";
-                }
-
-                
-                if (result.IsSuccess && result.Issues.Count == 0)
-                {
-                    System.Diagnostics.Debug.WriteLine("[ВЫХОД]: Цикл прерван! Код идеален");
-                    UpdateStatus("✅ Код успешно скомпилирован, автоматически исправлен и протестирован!");
-                    break;
-                }
-
-                var errorsFeedBuilder = new StringBuilder();
-                string[] codeLines = lastCode.Split(new[] { "\r\n", "\n" }, StringSplitOptions.None);
-
-                foreach (var issue in result.Issues)
-                {
-                    errorsFeedBuilder.AppendLine("[BUG DETECTED]");
-                    errorsFeedBuilder.AppendLine($"Severity: {issue.Severity.ToUpper()}");
-                    errorsFeedBuilder.AppendLine($"Message: {issue.Message}");
-                    
-                    if (issue.Line.HasValue && issue.Line.Value > 0)
-                    {
-                        int zeroBasedLine = issue.Line.Value - 1;
-                        errorsFeedBuilder.AppendLine($"Line Number: {issue.Line.Value}");
-                        
-                        if (zeroBasedLine < codeLines.Length)
-                        {
-                            string problematicLine = codeLines[zeroBasedLine].Trim();
-                            errorsFeedBuilder.AppendLine($"Context Line Code: `{problematicLine}`");
-                        }
-                    }
-                    errorsFeedBuilder.AppendLine("--------------------------------");
-                }
-
-                lastErrorsReport = errorsFeedBuilder.ToString();
-                lastSmartHints = GenerateSmartHints(lastErrorsReport);
-
-                if (currentAttempt == maxAttempts)
-                {
-                    UpdateStatus($"⚠️ Лимит попыток исчерпан. Ошибок осталось: {result.Issues.Count}");
+                    errorsFeedBuilder.AppendLine($"   Код: `{codeLines[issue.Line.Value - 1].Trim()}`");
                 }
             }
-        }
-        catch (Exception ex)
-        {
-            GeneratedCode = $"❌ Критическая ошибка: {ex.Message}";
-            UpdateStatus("🚨 Сбой работы агента");
-        }
-        finally
-        {
-            IsBusy = false;
+
+            lastErrorsReport = errorsFeedBuilder.ToString();
+
+            if (currentAttempt == maxAttempts)
+            {
+                UpdateStatus($"⚠️ Ошибок осталось: {result.Issues.Count}");
+            }
         }
     }
+    catch (Exception ex)
+    {
+        GeneratedCode = $"❌ Ошибка пайплайна: {ex.Message}";
+        UpdateStatus("🚨 Сбой Стеллы");
+    }
+    finally
+    {
+        IsBusy = false;
+    }
+}
 
     private string GenerateSmartHints(string logs)
     {
@@ -226,18 +206,19 @@ public class MainWindowViewModel : ViewModelBase
     public string ExtractCode(string markdown)
     {
         if (string.IsNullOrWhiteSpace(markdown)) return "";
+    
         string startTag = "```rust";
-        int startIndex = markdown.IndexOf(startTag);
+        int startIndex = markdown.IndexOf(startTag, StringComparison.OrdinalIgnoreCase);
         if (startIndex == -1)
         {
-            startTag = "``";
+            startTag = "```";
             startIndex = markdown.IndexOf(startTag);
         }
 
         if (startIndex != -1)
         {
             int codeStart = startIndex + startTag.Length;
-            int endIndex = markdown.IndexOf(" ```", codeStart);
+            int endIndex = markdown.IndexOf("```", codeStart); 
 
             if (endIndex > codeStart)
             {

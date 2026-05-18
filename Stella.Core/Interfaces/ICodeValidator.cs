@@ -10,5 +10,5 @@ public interface ICodeValidator
 
 public interface ILLMService
 {
-    Task<string> GenerateCodeAsync(string prompt, string cartridgeId, int attempt = 1);
+    Task<string> GenerateCodeAsync(string prompt, string cartridgeId, int attempt = 1, double temperature = 0.0);
 }

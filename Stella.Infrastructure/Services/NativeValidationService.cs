@@ -5,72 +5,55 @@ using Stella.Core.Models;
 
 namespace Stella.Infrastructure.Services;
 
-public class DockerValidationService : ICodeValidator
+public class NativeValidationService : ICodeValidator
 {
-    private const string ImageName = "rust:1.78-slim"; 
-
     public async Task<CodeValidationResult> ValidateAsync(string code, CancellationToken ct = default)
     {
         string homeDir = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-        string tempDir = Path.Combine(homeDir, ".stella", "temp", $"project_{Guid.NewGuid()}");
+        string tempDir = Path.Combine(Path.GetTempPath(), "stella_projects", Guid.NewGuid().ToString());
         Directory.CreateDirectory(tempDir);
 
         try
         {
             await PrepareCargoProject(tempDir, code, ct);
 
-            string dockerArgs = $"run --rm -v \"{tempDir}\":/usr/src/myapp -w /usr/src/myapp {ImageName} " +
-                                "sh -c \"rustup component add clippy rustfmt > /dev/null 2>&1 " +
-                                "&& cargo add async-trait tokio serde serde_json > /dev/null 2>&1 " + 
-                                "&& rustfmt src/main.rs " + 
-                                "&& cargo clippy --fix --allow-dirty --allow-no-vcs > /dev/null 2>&1 " + 
-                                "&& cargo clippy --message-format=json -- -D warnings -W clippy::pedantic " +
-                                "&& cargo test --message-format=json\"";
+            string cargoPath = Path.Combine(homeDir, ".cargo", "bin", "cargo");
+            if (!File.Exists(cargoPath))
+            {
+                cargoPath = "cargo";
+            }
 
             var startInfo = new ProcessStartInfo
             {
-                FileName = "/usr/local/bin/docker",
+                FileName = cargoPath,
                 Arguments = "clippy --message-format=json --all-targets -- -W warnings -W clippy::pedantic",
+                WorkingDirectory = tempDir,
                 RedirectStandardOutput = true,
-                RedirectStandardError = true, 
+                RedirectStandardError = true,
                 UseShellExecute = false,
                 CreateNoWindow = true
             };
-
-            if (!File.Exists(startInfo.FileName))
-            {
-                startInfo.FileName = "docker";
-            }
 
             using var process = Process.Start(startInfo);
             if (process == null)
             {
                 return new CodeValidationResult(false, "", new List<ValidationIssue> 
                 { 
-                    new("error", "Не удалось запустить Docker. Проверь, запущен ли Docker Desktop.", null, null) 
+                    new("error", "Не удалось запустить локальный процесс cargo. Проверь установку Rustup.", null, null) 
                 });
             }
-        
+
             string output = await process.StandardOutput.ReadToEndAsync(ct);
-            string errorOutput = await process.StandardError.ReadToEndAsync(ct);
             await process.WaitForExitAsync(ct);
 
-            if (process.ExitCode != 0 && string.IsNullOrWhiteSpace(output))
-            {
-                return new CodeValidationResult(false, errorOutput, new List<ValidationIssue>
-                {
-                    new("error", $"Docker упал с кодом {process.ExitCode}. Лог: {errorOutput}", null, null)
-                });
-            }
-
-            var validationResult = ParseCargoErrors(output);
+            var validationResult = ParseCargoErrors(output, code);
             return new CodeValidationResult(validationResult.IsSuccess, output, validationResult.Issues, code);
         }
         catch (Exception ex)
         {
             return new CodeValidationResult(false, ex.Message, new List<ValidationIssue>
             {
-                new("error", $"Критический сбой Docker-валидатора: {ex.Message}", null, null)
+                new("error", $"Ошибка нативного валидатора: {ex.Message}", null, null)
             });
         }
         finally
@@ -101,14 +84,14 @@ serde_json = '1.0'
         await File.WriteAllTextAsync(Path.Combine(path, "src/main.rs"), code, ct);
     }
 
-    private CodeValidationResult ParseCargoErrors(string rawJson)
+    private CodeValidationResult ParseCargoErrors(string rawJson,  string code)
     {
         var issues = new List<ValidationIssue>();
         
         if (string.IsNullOrWhiteSpace(rawJson))
         {
-            issues.Add(new ValidationIssue("error", "Контейнер Docker не вернул логов компиляции.", null, null));
-            return new CodeValidationResult(false, rawJson, issues);
+            issues.Add(new ValidationIssue("error", "Локальный компилятор Rust не вернул данных. Проверь синтаксис.", null, null));
+            return new CodeValidationResult(false, rawJson, issues,  code);
         }
 
         var lines = rawJson.Split('\n', StringSplitOptions.RemoveEmptyEntries);
@@ -139,12 +122,15 @@ serde_json = '1.0'
             catch { }
         }
 
-        bool isSuccess = issues.Count > 0 && !issues.Any(i => i.Severity.ToLower() == "error");
-        if (issues.Count == 0 && (rawJson.Contains("success") || rawJson.Contains("running")))
+        
+        bool isSuccess = !issues.Any(i => i.Severity.ToLower() == "error" || i.Severity.ToLower() == "deny");
+
+
+        if (issues.Count == 0)
         {
             isSuccess = true;
         }
 
-        return new CodeValidationResult(isSuccess, rawJson, issues);
+        return new CodeValidationResult(isSuccess, rawJson, issues, code);
     }
 }

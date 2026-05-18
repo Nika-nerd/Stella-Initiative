@@ -26,10 +26,11 @@ public partial class App : Application
 
         services.AddHttpClient<ILLMService, OllamaChatService>(client =>
         {
-            client.Timeout = TimeSpan.FromMinutes(5);
+            client.Timeout = TimeSpan.FromMinutes(10);
         });
 
-        services.AddSingleton<ICodeValidator, DockerValidationService>();
+        services.AddSingleton<ICodeValidator, NativeValidationService>();
+        
 
         services.AddSingleton<MainWindowViewModel>();
         
