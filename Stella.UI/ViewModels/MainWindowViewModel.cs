@@ -66,109 +66,85 @@ public class MainWindowViewModel : ViewModelBase
     try
     {
         while (currentAttempt < maxAttempts)
-        {
-            currentAttempt++;
-            
-            double targetTemperature = currentAttempt == 1 ? 0.0 : 0.2 + (currentAttempt * 0.15);
-            if (forceAlternativeStrategy) targetTemperature = Math.Min(targetTemperature + 0.2, 0.95);
+{
+    currentAttempt++;
+    
+    double targetTemperature = 0.0; 
 
-            UpdateStatus($"⏳ Попытка {currentAttempt}/{maxAttempts} (Temp: {targetTemperature:F2})...");
-            await Task.Delay(100);
-            
-            var iterationPromptBuilder = new StringBuilder();
+    UpdateStatus($"⏳ Попытка {currentAttempt}/{maxAttempts}...");
+    if (currentAttempt > 1)
+    {
+        UpdateStatus($"Ожидание лимитов API (2 сек)...");
+        await Task.Delay(2000);
+    }
+    
+    
+    var iterationPromptBuilder = new StringBuilder();
 
-            if (currentAttempt == 1)
-            {
-                iterationPromptBuilder.AppendLine($"Initial Task: {UserPrompt}");
-            }
-            else
-            {
-                iterationPromptBuilder.AppendLine($"Task: {UserPrompt}\n");
-                iterationPromptBuilder.AppendLine("CRITICAL: Your previous implementation is completely wrong and fails Rust validation.");
-                
-                if (forceAlternativeStrategy)
-                {
-                    iterationPromptBuilder.AppendLine("![WARNING]: YOU ARE STUCK IN A LOOP. Do NOT write the code the same way. Destroy your previous structural approach and rewrite it using completely different Rust language features!");
-                    forceAlternativeStrategy = false; 
-                }
+    if (currentAttempt == 1)
+    {
+        iterationPromptBuilder.AppendLine($"Task: {UserPrompt}");
+    }
+    else
+    {
+        iterationPromptBuilder.AppendLine($"Task: {UserPrompt}\n");
+        iterationPromptBuilder.AppendLine("Your previous code has compilation errors. Fix them.");
+        iterationPromptBuilder.AppendLine("=== CODE TO FIX ===");
+        iterationPromptBuilder.AppendLine(lastCode);
+        iterationPromptBuilder.AppendLine("===================\n");
+        iterationPromptBuilder.AppendLine("=== COMPILER ERRORS ===");
+        iterationPromptBuilder.AppendLine(lastErrorsReport); 
+        iterationPromptBuilder.AppendLine("\nReturn the complete fixed code inside ```rust ...```. No explanations.");
+    }
+    
+    var response = await _llmService.GenerateCodeAsync(iterationPromptBuilder.ToString(), "default", currentAttempt, targetTemperature);
+    var newCode = ExtractCode(response);
 
-                iterationPromptBuilder.AppendLine("=== CURRENT WRONG CODE ===");
-                iterationPromptBuilder.AppendLine(lastCode);
-                iterationPromptBuilder.AppendLine("==========================\n");
+    if (string.IsNullOrWhiteSpace(newCode) || !newCode.Contains('}')) 
+    {
+        UpdateStatus("⚠️ Модель вернула поврежденный или недописанный код. Пробуем еще раз...");
+        targetTemperature = 0.3;
+        continue;
+    }
 
-                iterationPromptBuilder.AppendLine("=== COMPILER ERRORS ===");
-                iterationPromptBuilder.AppendLine(lastErrorsReport);
-                iterationPromptBuilder.AppendLine("\nInstruction: Fix the exact lines with errors. Return the FULL updated file inside ```rust ...```.");
-            }
-            
-            System.Diagnostics.Debug.WriteLine($"\n================[ПОПЫТКА {currentAttempt} | TEMP: {targetTemperature}]==============");
+    if (newCode == lastCode)
+    {
+        UpdateStatus("⚠️ Модель выдала точную копию кода. Прерывание.");
+        break;
+    }
 
-            var response = await _llmService.GenerateCodeAsync(iterationPromptBuilder.ToString(), "default", currentAttempt, targetTemperature);
-            var newCode = ExtractCode(response);
+    lastCode = newCode;
+    GeneratedCode = response;
 
-            if (string.IsNullOrWhiteSpace(newCode))
-            {
-                UpdateStatus("⚠️ Модель выдала пустой код.");
-                break;
-            }
+    UpdateStatus($"🔍 Проверка компилятором (попытка {currentAttempt})...");
+    var result = await _validator.ValidateAsync(newCode);
+    
+    if (result.IsSuccess && result.Issues.Count == 0)
+    {
+        UpdateStatus("✅ Код успешно скомпилирован!");
+        break;
+    }
 
-            if (failedCodeAttempts.Contains(newCode) || newCode == lastCode)
-            {
-                System.Diagnostics.Debug.WriteLine($"[ПЕРЕХВАТ ПЕТЛИ]: Модель выдала дубликат. Форсируем хаос.");
-                forceAlternativeStrategy = true;
-                
-                if (currentAttempt < maxAttempts)
-                {
-                    currentAttempt--; 
-                    lastErrorsReport += "\n- Ошибка: Ты вернула точную копию предыдущего ошибочного кода! Измени логику!";
-                    continue;
-                }
-                UpdateStatus($"⚠️ Тупик. Модель не смогла выйти из цикла.");
-                break;
-            }
+    
+    var errorsFeedBuilder = new StringBuilder();
+    
+    var mainIssue = result.Issues.FirstOrDefault(i => i.Severity.ToLower() == "error");
+    if (mainIssue != null)
+    {
+        errorsFeedBuilder.AppendLine($"Error on line {mainIssue.Line}: {mainIssue.Message}");
+    }
+    else if (result.Issues.Count > 0)
+    {
+        errorsFeedBuilder.AppendLine($"Issue: {result.Issues[0].Message}");
+    }
 
-            lastCode = newCode;
-            GeneratedCode = response; 
+    lastErrorsReport = errorsFeedBuilder.ToString();
 
-            UpdateStatus($"🔍 Проверка кода компилятором (попытка {currentAttempt})...");
-            var result = await _validator.ValidateAsync(newCode);
-            
-            if (!string.IsNullOrEmpty(result.UpdatedCode) && result.UpdatedCode != lastCode)
-            {
-                lastCode = result.UpdatedCode;
-                string planPrefix = response.Contains("/*") && response.IndexOf("*/") > 0 
-                    ? response.Substring(0, response.IndexOf("*/") + 2) + "\n\n" 
-                    : "";
-                GeneratedCode = planPrefix + "```rust\n" + lastCode + "\n```";
-            }
-
-            if (result.IsSuccess && result.Issues.Count == 0)
-            {
-                UpdateStatus("✅ Код успешно скомпилирован!");
-                break;
-            }
-
-            failedCodeAttempts.Add(newCode);
-
-            var errorsFeedBuilder = new StringBuilder();
-            string[] codeLines = lastCode.Split(new[] { "\r\n", "\n" }, StringSplitOptions.None);
-
-            foreach (var issue in result.Issues.Take(4))
-            {
-                errorsFeedBuilder.AppendLine($"-> [{issue.Severity.ToUpper()}] Линия {issue.Line}: {issue.Message}");
-                if (issue.Line.HasValue && issue.Line.Value > 0 && issue.Line.Value <= codeLines.Length)
-                {
-                    errorsFeedBuilder.AppendLine($"   Код: `{codeLines[issue.Line.Value - 1].Trim()}`");
-                }
-            }
-
-            lastErrorsReport = errorsFeedBuilder.ToString();
-
-            if (currentAttempt == maxAttempts)
-            {
-                UpdateStatus($"⚠️ Ошибок осталось: {result.Issues.Count}");
-            }
-        }
+    if (currentAttempt == maxAttempts)
+    {
+        UpdateStatus($"❌ Не удалось исправить. Ошибок: {result.Issues.Count}");
+    }
+}
     }
     catch (Exception ex)
     {

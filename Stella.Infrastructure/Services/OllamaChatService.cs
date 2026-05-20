@@ -1,4 +1,6 @@
 using System.Text;
+using System.IO;
+using Microsoft.Extensions.Configuration;
 using System.Text.Json;
 using Stella.Core.Interfaces;
 
@@ -7,76 +9,97 @@ namespace Stella.Infrastructure.Services;
 public class OllamaChatService : ILLMService
 {
     private readonly HttpClient _httpClient;
-    private const string OllamaUrl = "http://localhost:11434/api/generate";
+    
+    private const string ModelName = "gemini-2.5-flash";
+    private const string ApiUrl = $"https://generativelanguage.googleapis.com/v1beta/models/{ModelName}:generateContent";
+    
+    private readonly string _apiKey;
 
     public OllamaChatService(HttpClient httpClient)
     {
         _httpClient = httpClient;
+
+        var configuration = new ConfigurationBuilder()
+            .SetBasePath(AppContext.BaseDirectory)
+            .AddJsonFile("appsettings.json", optional: true, reloadOnChange: true)
+            .Build();
+        
+        _apiKey = configuration["Gemini:ApiKey"] ?? string.Empty;
+
+        if (string.IsNullOrEmpty(_apiKey) || _apiKey == "MY_API_KEY")
+        {
+            System.Diagnostics.Debug.WriteLine("Gemini API Key is missing");
+        }
     }
 
-    public async Task<string> GenerateCodeAsync(string prompt, string cartridgeId, int attempt = 1, double temperature = 0.0)
+  public async Task<string> GenerateCodeAsync(string prompt, string cartridgeId, int attempt = 1, double temperature = 0.0)
+{
+    string systemInstruction = 
+        "You are Stella, an expert Rust compiler assistant. Your absolute priority is code that COMPILES without errors.\n\n" +
+        "=== STRICT COMPILATION RULES ===\n" +
+        "1. STRICT TYPES: Match types perfectly. Pay attention to Ownership and Borrowing.\n" +
+        "2. NO UNKNOWN CRATES: Use ONLY `serde`, `serde_json`, and `tokio` (full).\n" +
+        "3. LIFETIMES: Use owned data (`String`, `Vec`) inside structs to avoid lifetime errors.\n\n" +
+        "=== OUTPUT FORMAT ===\n" +
+        "- Start directly with ```rust and end with ```.\n" +
+        "- No explanations, no text outside the block.";
+
+    var requestBody = new
     {
-       
-
-        string systemInstruction = 
-            "You are Stella, a pragmatic and senior Rust Developer. Your goal is to write clean, idiomatic, and maintainable Rust code.\n\n" +
-    
-            "=== CORE PRINCIPLES ===\n" +
-            "1. PRAGMATISM: Use the simplest architecture that solves the problem. Avoid over-engineering. Do not default to `async`, `Arc`, or `Mutex` unless the task strictly requires concurrency.\n" +
-            "2. IDIOMATIC RUST: Use modern Rust features (2021 edition). Prefer `?` for error propagation. Avoid `unwrap()` and `expect()` at all costs.\n" +
-            "3. CODE QUALITY: Write code that passes `clippy` checks. However, if code compiles and is architecturally sound, do not loop endlessly to fix trivial style warnings. Efficiency is key.\n" +
-            "4. NO FLUFF: Provide the code solution immediately. Do not write introductory or concluding text outside of the code block. Use comments only to explain complex logic.\n\n" +
-    
-            "=== TECHNICAL GUIDELINES ===\n" +
-            "- If a task is a simple CRUD or data operation, keep it synchronous.\n" +
-            "- Always include a `mod tests` block at the bottom of your code with simple unit tests to verify your logic.\n" +
-            "- If you use external crates, specify them in the first line of the code block as: `// crates: serde, tokio`.\n" +
-            "- Use `#[derive(Debug, Serialize, Deserialize)]` for data models where appropriate.\n" +
-            "- Focus on standard library features first. Only reach for complex crates when necessary.\n\n" +
-    
-            "=== RESPONSE PROTOCOL ===\n" +
-            "- Start with a very brief 'Design Plan' (one sentence) inside a comment.\n" +
-            "- Then, provide the implementation in a single ```rust code block.\n" +
-            "- STOP immediately once you provide a working solution.\n" +
-            "- If you encounter compiler feedback, fix the error, not the style. Focus on functionality first.";
-        
-        var requestBody = new
+        contents = new[]
         {
-            model = "deepseek-coder-v2:lite", 
-            prompt = $"System: {systemInstruction}\nUser: {prompt}\nAssistant:",
-            stream = false,
-            options = new 
-            { 
-                temperature = temperature, 
-                top_p = 0.95,
-                num_ctx = 4096,    
-                stop = new[] { "User:", "System:" } 
-            }
-        };
+            new { parts = new[] { new { text = $"System instruction:\n{systemInstruction}\n\nUser task:\n{prompt}" } } }
+        },
+        generationConfig = new
+        {
+            temperature = temperature,
+            maxOutputTokens = 8192
+        }
+    };
 
-        
+    string requestUrl = $"{ApiUrl}?key={_apiKey}";
     
+    int maxApiRetries = 3;
+    int currentApiRetry = 0;
 
+    while (true)
+    {
+        currentApiRetry++;
         var content = new StringContent(JsonSerializer.Serialize(requestBody), Encoding.UTF8, "application/json");
-    
+        
         try 
         {
-            var response = await _httpClient.PostAsync(OllamaUrl, content);
+            var response = await _httpClient.PostAsync(requestUrl, content);
+            
+            if (((int)response.StatusCode == 503 || (int)response.StatusCode == 429) && currentApiRetry <= maxApiRetries)
+            {
+                await Task.Delay(3000);
+                continue; 
+            }
 
             if (!response.IsSuccessStatusCode)
-                return $"Error: {response.ReasonPhrase}";
+            {
+                string errContent = await response.Content.ReadAsStringAsync();
+                return $"Error: {response.StatusCode} - {response.ReasonPhrase}. Details: {errContent}";
+            }
 
             var jsonResponse = await response.Content.ReadAsStringAsync();
             using var doc = JsonDocument.Parse(jsonResponse);
-        
             
-            string aiResponse = doc.RootElement.GetProperty("response").GetString() ?? "No response";
-        
-            return aiResponse;
+            var candidates = doc.RootElement.GetProperty("candidates");
+            var contentNode = candidates[0].GetProperty("content");
+            var parts = contentNode.GetProperty("parts");
+            return parts[0].GetProperty("text").GetString() ?? "No response";
+        }
+        catch (Exception ex) when (currentApiRetry <= maxApiRetries)
+        {
+            await Task.Delay(3000);
+            continue;
         }
         catch (Exception ex)
         {
             return $"Connection error: {ex.Message}";
         }
     }
+}
 }

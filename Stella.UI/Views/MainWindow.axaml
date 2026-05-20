@@ -13,7 +13,7 @@
             
             
             <TextBox Name="InputBox" Text="{Binding UserPrompt, Mode=TwoWay}"
-                     Height="80" Watermark="Введите задачу..."/>
+                     Height="120" Watermark="Введите задачу..." AcceptsReturn="True" TextWrapping="Wrap"/>
            
             <Button Name="GenButton" 
                    Click="OnGenButtonClick"

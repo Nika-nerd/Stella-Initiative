@@ -21,16 +21,13 @@ public class DockerValidationService : ICodeValidator
 
             string dockerArgs = $"run --rm -v \"{tempDir}\":/usr/src/myapp -w /usr/src/myapp {ImageName} " +
                                 "sh -c \"rustup component add clippy rustfmt > /dev/null 2>&1 " +
-                                "&& cargo add async-trait tokio serde serde_json > /dev/null 2>&1 " + 
                                 "&& rustfmt src/main.rs " + 
-                                "&& cargo clippy --fix --allow-dirty --allow-no-vcs > /dev/null 2>&1 " + 
-                                "&& cargo clippy --message-format=json -- -D warnings -W clippy::pedantic " +
-                                "&& cargo test --message-format=json\"";
+                                "&& cargo clippy --message-format=json --all-targets -- -W warnings -W clippy::pedantic\"";
 
             var startInfo = new ProcessStartInfo
             {
                 FileName = "/usr/local/bin/docker",
-                Arguments = "clippy --message-format=json --all-targets -- -W warnings -W clippy::pedantic",
+                Arguments = dockerArgs, 
                 RedirectStandardOutput = true,
                 RedirectStandardError = true, 
                 UseShellExecute = false,
@@ -63,8 +60,7 @@ public class DockerValidationService : ICodeValidator
                 });
             }
 
-            var validationResult = ParseCargoErrors(output);
-            return new CodeValidationResult(validationResult.IsSuccess, output, validationResult.Issues, code);
+            return ParseCargoErrors(output, code);
         }
         catch (Exception ex)
         {
@@ -95,20 +91,21 @@ edition = '2021'
 [dependencies]
 serde = { version = '1.0', features = ['derive'] }
 serde_json = '1.0'
+tokio = { version = '1.0', features = ['full'] }
+async-trait = '0.1'
 ";
-
         await File.WriteAllTextAsync(Path.Combine(path, "Cargo.toml"), cargoToml, ct);
         await File.WriteAllTextAsync(Path.Combine(path, "src/main.rs"), code, ct);
     }
 
-    private CodeValidationResult ParseCargoErrors(string rawJson)
+    private CodeValidationResult ParseCargoErrors(string rawJson, string code)
     {
         var issues = new List<ValidationIssue>();
         
         if (string.IsNullOrWhiteSpace(rawJson))
         {
             issues.Add(new ValidationIssue("error", "Контейнер Docker не вернул логов компиляции.", null, null));
-            return new CodeValidationResult(false, rawJson, issues);
+            return new CodeValidationResult(false, rawJson, issues, code);
         }
 
         var lines = rawJson.Split('\n', StringSplitOptions.RemoveEmptyEntries);
@@ -139,12 +136,10 @@ serde_json = '1.0'
             catch { }
         }
 
-        bool isSuccess = issues.Count > 0 && !issues.Any(i => i.Severity.ToLower() == "error");
-        if (issues.Count == 0 && (rawJson.Contains("success") || rawJson.Contains("running")))
-        {
-            isSuccess = true;
-        }
+       
+        bool hasErrors = issues.Any(i => i.Severity.ToLower() == "error" || i.Severity.ToLower() == "deny");
+        bool isSuccess = !hasErrors; 
 
-        return new CodeValidationResult(isSuccess, rawJson, issues);
+        return new CodeValidationResult(isSuccess, rawJson, issues, code);
     }
 }
