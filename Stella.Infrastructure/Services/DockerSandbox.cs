@@ -1,2 +1,0 @@
-namespace Stella.Infrastructure.Services;
-
