@@ -1,4 +1,6 @@
-﻿namespace Stella.Tests;
+﻿using Xunit;
+
+namespace Stella.Tests;
 
 public class UnitTest1
 {

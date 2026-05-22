@@ -1,6 +1,12 @@
+using System;
+using System.Collections.Generic;
 using System.Diagnostics;
+using System.IO;
+using System.Linq;
 using System.Text;
 using System.Text.Json;
+using System.Threading;
+using System.Threading.Tasks;
 using Stella.Core.Interfaces;
 using Stella.Core.Models;
 
@@ -8,69 +14,66 @@ namespace Stella.Infrastructure.Services;
 
 public class DockerValidationService : ICodeValidator
 {
-    
     private const string ImageName = "rust:1.78"; 
 
     public async Task<CodeValidationResult> ValidateAsync(string code, CancellationToken ct = default)
     {
-        string homeDir = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-        string tempDir = Path.Combine(homeDir, ".stella", "temp", $"project_{Guid.NewGuid()}");
+        string tempDir = Path.Combine(Path.GetTempPath(), "stella_docker", Guid.NewGuid().ToString());
         Directory.CreateDirectory(tempDir);
 
         try
         {
             await PrepareCargoProject(tempDir, code, ct);
 
-           
-            string dockerArgs = $"run --rm -v \"{tempDir}\":/usr/src/myapp -w /usr/src/myapp {ImageName} " +
-                                "sh -c \"cargo clippy --message-format=json --all-targets -- -W warnings -W clippy::pedantic " +
-                                "&& cargo test --message-format=json\"";
+            string clippyArgs = $"run --rm -v \"{tempDir}\":/usr/src/myapp -w /usr/src/myapp {ImageName} " +
+                                "cargo clippy --message-format=json --all-targets -- -W warnings -W clippy::pedantic";
 
-            var startInfo = new ProcessStartInfo
+            var clippyInfo = new ProcessStartInfo
             {
                 FileName = OperatingSystem.IsWindows() ? "docker.exe" : "docker",
-                Arguments = dockerArgs, 
+                Arguments = clippyArgs, 
                 RedirectStandardOutput = true,
-                RedirectStandardError = true, 
+                RedirectStandardError = false, 
                 UseShellExecute = false,
                 CreateNoWindow = true
             };
 
-            using var process = Process.Start(startInfo);
-            if (process == null)
-            {
-                return new CodeValidationResult(false, "Docker start failed", new() 
-                { 
-                    new("error", "Не удалось запустить Docker. Проверь, запущен ли Docker Desktop.", null, null) 
-                }, code);
-            }
-        
-            string output = await process.StandardOutput.ReadToEndAsync(ct);
-            string errorOutput = await process.StandardError.ReadToEndAsync(ct);
-            await process.WaitForExitAsync(ct);
+            using var clippyProcess = Process.Start(clippyInfo);
+            if (clippyProcess == null)
+                return new CodeValidationResult(false, "Docker start failed", new() { new("error", "Не удалось запустить Docker.", null, null) }, code);
 
-            if (process.ExitCode != 0 && string.IsNullOrWhiteSpace(output))
+            string clippyOutput = await clippyProcess.StandardOutput.ReadToEndAsync(ct);
+            await clippyProcess.WaitForExitAsync(ct);
+
+            var result = ParseCargoErrors(clippyOutput, code);
+            if (!result.IsSuccess) return result;
+
+            string testArgs = $"run --rm -v \"{tempDir}\":/usr/src/myapp -w /usr/src/myapp {ImageName} " +
+                              "cargo test --message-format=json";
+
+            var testInfo = new ProcessStartInfo
             {
-                return new CodeValidationResult(false, $"Docker exit code {process.ExitCode}", new()
-                {
-                    new("error", $"Контейнер аварийно завершился. Лог: {errorOutput}", null, null)
-                }, code);
+                FileName = OperatingSystem.IsWindows() ? "docker.exe" : "docker",
+                Arguments = testArgs, 
+                RedirectStandardOutput = true,
+                RedirectStandardError = false, 
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
+
+            using var testProcess = Process.Start(testInfo);
+            if (testProcess != null)
+            {
+                string testOutput = await testProcess.StandardOutput.ReadToEndAsync(ct);
+                await testProcess.WaitForExitAsync(ct);
+                result = ParseTestResults(testOutput, result, code);
             }
 
-            var clippyResult = ParseCargoErrors(output, code);
-            if (!clippyResult.IsSuccess)
-            {
-                return clippyResult;
-            }
-
-            return ParseTestResults(output, clippyResult, code);
+            return result;
         }
         catch (Exception ex)
         {
-            return new CodeValidationResult(false, ex.Message, new()
-            {
-                new("error", $"Критический сбой Docker-валидатора: {ex.Message}", null, null)
-            }, code);
+            return new CodeValidationResult(false, ex.Message, new() { new("error", $"Критический сбой Docker-валидатора: {ex.Message}", null, null) }, code);
         }
         finally
         {
@@ -116,8 +119,16 @@ public class DockerValidationService : ICodeValidator
                         var spans = messageNode.GetProperty("spans");
                         if (spans.GetArrayLength() > 0) lineNum = spans[0].GetProperty("line_start").GetInt32();
                         
+                        string errorCode = "";
+                        if (messageNode.TryGetProperty("code", out var codeProp) && !codeProp.ValueKind.Equals(JsonValueKind.Null))
+                        {
+                            errorCode = codeProp.GetProperty("code").GetString() ?? "";
+                        }
+
                         issues.Add(new ValidationIssue(level, message, lineNum, 0));
-                        cleanErrorsLog.AppendLine($"[Line {lineNum}] {message}");
+                        
+                        string clippyTag = string.IsNullOrEmpty(errorCode) ? "" : $" [{errorCode}]";
+                        cleanErrorsLog.AppendLine($"[Line {lineNum}]{clippyTag} {message}");
                     }
                 }
             }
@@ -143,16 +154,19 @@ public class DockerValidationService : ICodeValidator
                 using var doc = JsonDocument.Parse(line);
                 var root = doc.RootElement;
 
-                if (root.TryGetProperty("event", out var testEvent) && root.TryGetProperty("name", out var testName))
+                if (root.TryGetProperty("type", out var typeProp) && typeProp.GetString() == "test")
                 {
-                    if (testEvent.GetString() == "failed")
+                    if (root.TryGetProperty("event", out var testEvent) && root.TryGetProperty("name", out var testName))
                     {
-                        isSuccess = false;
-                        string name = testName.GetString() ?? "unknown";
-                        string stdout = root.TryGetProperty("stdout", out var outProp) ? outProp.GetString() ?? "" : "";
-                        
-                        issues.Add(new ValidationIssue("error", $"Test '{name}' failed.", null, null));
-                        testLog.AppendLine($"[Test Failed] '{name}'\nLog: {stdout}");
+                        if (testEvent.GetString() == "failed")
+                        {
+                            isSuccess = false;
+                            string name = testName.GetString() ?? "unknown";
+                            string stdout = root.TryGetProperty("stdout", out var outProp) ? outProp.GetString() ?? "" : "";
+                            
+                            issues.Add(new ValidationIssue("error", $"Test '{name}' failed.", null, null));
+                            testLog.AppendLine($"[Test Failed] '{name}'\nLog: {stdout}");
+                        }
                     }
                 }
             }

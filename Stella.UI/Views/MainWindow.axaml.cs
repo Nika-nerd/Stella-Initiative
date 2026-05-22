@@ -4,7 +4,6 @@ using Stella.UI.ViewModels;
 using System.Threading.Tasks;
 using Avalonia.Input.Platform;
 
-
 namespace Stella.UI.Views;
 
 public partial class MainWindow : Window
@@ -14,12 +13,11 @@ public partial class MainWindow : Window
         InitializeComponent();
     }
 
-    private void OnGenButtonClick(object sender, RoutedEventArgs e)
+    private async void OnGenButtonClick(object sender, RoutedEventArgs e)
     {
         if (DataContext is MainWindowViewModel vm)
         {
-           
-            Task.Run(() => vm.StartGenerationProcess());
+            await vm.StartGenerationProcess();
         }
     }
     

@@ -1,3 +1,5 @@
+using System.Collections.Generic;
+
 namespace Stella.Core.Models;
 
 public record ValidationIssue(string Severity,

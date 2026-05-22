@@ -1,5 +1,8 @@
+using System;
+using System.Net.Http;
 using System.Text;
 using System.Text.Json;
+using System.Threading.Tasks;
 using Microsoft.Extensions.Configuration;
 using Stella.Core.Interfaces;
 
@@ -32,13 +35,15 @@ public class GeminiAPIService : ILLMService
             "1. ZERO ERRORS: Code must strictly compile via rustc, pass all clippy lints (pedantic), and satisfy the borrow checker.\n" +
             "2. DEPENDENCIES: Use ONLY the Rust Standard Library (std). No external crates are allowed unless specified.\n" +
             "3. TESTING: Always include a `mod tests` block with comprehensive `#[test]` functions at the bottom of the code.\n\n" +
+            "=== NO COMMENTS RULE ===\n" +
+            "4. ABSOLUTELY NO CODE COMMENTS: Do not write ANY comments (neither `//` nor `/* */`) inside the Rust code block. The code must be self-explanatory and completely clean of inline natural language notes or explanations.\n\n" +
             "=== RESPONSE STRUCTURE FORMAT ===\n" +
             "Your response MUST follow this exact layout:\n\n" +
             "[ANALYSIS & PLANNING]\n" +
             "Provide a brief, high-level structural plan or explanation of fixes here in plain English text. Do not use any code blocks in this section.\n\n" +
             "[CODE BLOCK]\n" +
             "Provide the complete, executable Rust code inside exactly one markdown block starting with ```rust and ending with ```.\n" +
-            "CRITICAL: Keep the interior of the ```rust block completely clean—no natural language, no trailing explanations, and no placeholders.";
+            "CRITICAL: Keep the interior of the ```rust block completely clean—no natural language, NO COMMENTS, no trailing explanations, and no placeholders.";
 
         var requestBody = new
         {
@@ -54,7 +59,7 @@ public class GeminiAPIService : ILLMService
         };
 
         string requestUrl = $"{ApiUrl}?key={_apiKey}";
-        int maxApiRetries = 3;
+        int maxApiRetries = 5; 
 
         for (int i = 0; i < maxApiRetries; i++)
         {
@@ -65,7 +70,8 @@ public class GeminiAPIService : ILLMService
 
                 if (((int)response.StatusCode == 503 || (int)response.StatusCode == 429) && i < maxApiRetries - 1)
                 {
-                    await Task.Delay(2000);
+                    int delay = (int)Math.Pow(2, i + 1) * 1000; 
+                    await Task.Delay(delay);
                     continue;
                 }
 
@@ -86,7 +92,8 @@ public class GeminiAPIService : ILLMService
             }
             catch when (i < maxApiRetries - 1)
             {
-                await Task.Delay(2000);
+                int delay = (int)Math.Pow(2, i + 1) * 1000;
+                await Task.Delay(delay);
             }
         }
         return "Connection error: Failed after retries.";

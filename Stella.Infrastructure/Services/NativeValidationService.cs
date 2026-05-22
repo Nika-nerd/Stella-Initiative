@@ -1,6 +1,12 @@
+using System;
+using System.Collections.Generic;
 using System.Diagnostics;
+using System.IO;
+using System.Linq;
 using System.Text;
 using System.Text.Json;
+using System.Threading;
+using System.Threading.Tasks;
 using Stella.Core.Interfaces;
 using Stella.Core.Models;
 
@@ -27,7 +33,7 @@ public class NativeValidationService : ICodeValidator
                 Arguments = "clippy --message-format=json --all-targets -- -W warnings -W clippy::pedantic",
                 WorkingDirectory = tempDir,
                 RedirectStandardOutput = true,
-                RedirectStandardError = true,
+                RedirectStandardError = false, 
                 UseShellExecute = false,
                 CreateNoWindow = true
             };
@@ -48,7 +54,7 @@ public class NativeValidationService : ICodeValidator
                 Arguments = "test --message-format=json",
                 WorkingDirectory = tempDir,
                 RedirectStandardOutput = true,
-                RedirectStandardError = true,
+                RedirectStandardError = false, 
                 UseShellExecute = false,
                 CreateNoWindow = true
             };
@@ -108,11 +114,20 @@ public class NativeValidationService : ICodeValidator
                     {
                         string message = messageNode.GetProperty("message").GetString() ?? "";
                         int? lineNum = null;
+                        
                         var spans = messageNode.GetProperty("spans");
                         if (spans.GetArrayLength() > 0) lineNum = spans[0].GetProperty("line_start").GetInt32();
                         
+                        string errorCode = "";
+                        if (messageNode.TryGetProperty("code", out var codeProp) && !codeProp.ValueKind.Equals(JsonValueKind.Null))
+                        {
+                            errorCode = codeProp.GetProperty("code").GetString() ?? "";
+                        }
+
                         issues.Add(new ValidationIssue(level, message, lineNum, 0));
-                        cleanErrorsLog.AppendLine($"[Line {lineNum}] {message}");
+                        
+                        string clippyTag = string.IsNullOrEmpty(errorCode) ? "" : $" [{errorCode}]";
+                        cleanErrorsLog.AppendLine($"[Line {lineNum}]{clippyTag} {message}");
                     }
                 }
             }
@@ -138,16 +153,19 @@ public class NativeValidationService : ICodeValidator
                 using var doc = JsonDocument.Parse(line);
                 var root = doc.RootElement;
 
-                if (root.TryGetProperty("event", out var testEvent) && root.TryGetProperty("name", out var testName))
+                if (root.TryGetProperty("type", out var typeProp) && typeProp.GetString() == "test")
                 {
-                    if (testEvent.GetString() == "failed")
+                    if (root.TryGetProperty("event", out var testEvent) && root.TryGetProperty("name", out var testName))
                     {
-                        isSuccess = false;
-                        string name = testName.GetString() ?? "unknown";
-                        string stdout = root.TryGetProperty("stdout", out var outProp) ? outProp.GetString() ?? "" : "";
-                        
-                        issues.Add(new ValidationIssue("error", $"Test '{name}' failed.", null, null));
-                        testLog.AppendLine($"[Test Failed] '{name}'\nLog: {stdout}");
+                        if (testEvent.GetString() == "failed")
+                        {
+                            isSuccess = false;
+                            string name = testName.GetString() ?? "unknown";
+                            string stdout = root.TryGetProperty("stdout", out var outProp) ? outProp.GetString() ?? "" : "";
+                            
+                            issues.Add(new ValidationIssue("error", $"Test '{name}' failed.", null, null));
+                            testLog.AppendLine($"[Test Failed] '{name}'\nLog: {stdout}");
+                        }
                     }
                 }
             }

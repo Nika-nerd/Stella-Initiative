@@ -31,6 +31,7 @@ public partial class App : Application
 
         services.AddSingleton<ICodeValidator, NativeValidationService>();
         
+        services.AddSingleton<IProjectAnalyzer, RustProjectAnalyzer>();
 
         services.AddSingleton<MainWindowViewModel>();
         
@@ -39,7 +40,6 @@ public partial class App : Application
         if (ApplicationLifetime is IClassicDesktopStyleApplicationLifetime desktop)
         {
             var viewModel = serviceProvider.GetRequiredService<MainWindowViewModel>();
-            
             
             desktop.MainWindow = new MainWindow
             {
