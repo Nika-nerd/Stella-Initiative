@@ -24,8 +24,12 @@ public class NativeValidationService : ICodeValidator
         {
             await PrepareCargoProject(tempDir, code, ct);
 
-            string cargoPath = Path.Combine(homeDir, ".cargo", "bin", "cargo");
-            if (!File.Exists(cargoPath)) cargoPath = "cargo";
+            string cargoPath = Path.Combine(homeDir, ".cargo", "bin", OperatingSystem.IsWindows() ? "cargo.exe" : "cargo");
+
+            if (!File.Exists(cargoPath)) 
+            {
+                cargoPath = OperatingSystem.IsWindows() ? "cargo.exe" : "cargo";
+            }
 
             var clippyInfo = new ProcessStartInfo
             {
@@ -40,7 +44,7 @@ public class NativeValidationService : ICodeValidator
 
             using var clippyProcess = Process.Start(clippyInfo);
             if (clippyProcess == null)
-                return new CodeValidationResult(false, "Cargo start failed", new() { new("error", "Cargo не найден.", null, null) }, code);
+                return new CodeValidationResult(false, "Cargo start failed", new() { new("error", "Cargo not found.", null, null) }, code);
 
             string clippyOutput = await clippyProcess.StandardOutput.ReadToEndAsync(ct);
             await clippyProcess.WaitForExitAsync(ct);

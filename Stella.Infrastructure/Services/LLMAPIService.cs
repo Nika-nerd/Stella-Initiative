@@ -8,14 +8,14 @@ using Stella.Core.Interfaces;
 
 namespace Stella.Infrastructure.Services;
 
-public class GeminiAPIService : ILLMService
+public class LLMAPIService : ILLMService
 {
     private readonly HttpClient _httpClient;
     private const string ModelName = "gemini-2.5-flash";
     private const string ApiUrl = $"https://generativelanguage.googleapis.com/v1beta/models/{ModelName}:generateContent";
     private readonly string _apiKey;
 
-    public GeminiAPIService(HttpClient httpClient)
+    public LLMAPIService(HttpClient httpClient)
     {
         _httpClient = httpClient;
 

@@ -17,72 +17,77 @@ public class DockerValidationService : ICodeValidator
     private const string ImageName = "rust:1.78"; 
 
     public async Task<CodeValidationResult> ValidateAsync(string code, CancellationToken ct = default)
+{
+    string baseTempDir = Path.Combine(Path.GetTempPath(), "stella_docker", Guid.NewGuid().ToString());
+    string tempDir = OperatingSystem.IsMacOS() ? $"/private{baseTempDir}" : Path.GetFullPath(baseTempDir);
+    
+    Directory.CreateDirectory(tempDir);
+
+    try
     {
-        string tempDir = Path.Combine(Path.GetTempPath(), "stella_docker", Guid.NewGuid().ToString());
-        Directory.CreateDirectory(tempDir);
+        await PrepareCargoProject(tempDir, code, ct);
 
-        try
+        
+        string dockerCmd = OperatingSystem.IsWindows() ? "docker.exe" : "docker";
+
+        string clippyArgs = $"run --rm -v \"{tempDir}\":/usr/src/myapp -w /usr/src/myapp {ImageName} " +
+                            "cargo clippy --message-format=json --all-targets -- -W warnings -W clippy::pedantic";
+
+        var clippyInfo = new ProcessStartInfo
         {
-            await PrepareCargoProject(tempDir, code, ct);
+            FileName = dockerCmd,
+            Arguments = clippyArgs, 
+            RedirectStandardOutput = true,
+            RedirectStandardError = false, 
+            UseShellExecute = false,
+            CreateNoWindow = true
+        };
 
-            string clippyArgs = $"run --rm -v \"{tempDir}\":/usr/src/myapp -w /usr/src/myapp {ImageName} " +
-                                "cargo clippy --message-format=json --all-targets -- -W warnings -W clippy::pedantic";
+        using var clippyProcess = Process.Start(clippyInfo);
+        if (clippyProcess == null)
+            return new CodeValidationResult(false, "Docker start failed", new() { new("error", "Не удалось запустить Docker.", null, null) }, code);
 
-            var clippyInfo = new ProcessStartInfo
-            {
-                FileName = OperatingSystem.IsWindows() ? "docker.exe" : "docker",
-                Arguments = clippyArgs, 
-                RedirectStandardOutput = true,
-                RedirectStandardError = false, 
-                UseShellExecute = false,
-                CreateNoWindow = true
-            };
+        string clippyOutput = await clippyProcess.StandardOutput.ReadToEndAsync(ct);
+        await clippyProcess.WaitForExitAsync(ct);
 
-            using var clippyProcess = Process.Start(clippyInfo);
-            if (clippyProcess == null)
-                return new CodeValidationResult(false, "Docker start failed", new() { new("error", "Не удалось запустить Docker.", null, null) }, code);
+        var result = ParseCargoErrors(clippyOutput, code);
+        if (!result.IsSuccess) return result;
 
-            string clippyOutput = await clippyProcess.StandardOutput.ReadToEndAsync(ct);
-            await clippyProcess.WaitForExitAsync(ct);
+        string testArgs = $"run --rm -v \"{tempDir}\":/usr/src/myapp -w /usr/src/myapp {ImageName} " +
+                          "cargo test --message-format=json";
 
-            var result = ParseCargoErrors(clippyOutput, code);
-            if (!result.IsSuccess) return result;
+        var testInfo = new ProcessStartInfo
+        {
+            FileName = dockerCmd,
+            Arguments = testArgs, 
+            RedirectStandardOutput = true,
+            RedirectStandardError = false, 
+            UseShellExecute = false,
+            CreateNoWindow = true
+        };
 
-            string testArgs = $"run --rm -v \"{tempDir}\":/usr/src/myapp -w /usr/src/myapp {ImageName} " +
-                              "cargo test --message-format=json";
-
-            var testInfo = new ProcessStartInfo
-            {
-                FileName = OperatingSystem.IsWindows() ? "docker.exe" : "docker",
-                Arguments = testArgs, 
-                RedirectStandardOutput = true,
-                RedirectStandardError = false, 
-                UseShellExecute = false,
-                CreateNoWindow = true
-            };
-
-            using var testProcess = Process.Start(testInfo);
-            if (testProcess != null)
-            {
-                string testOutput = await testProcess.StandardOutput.ReadToEndAsync(ct);
-                await testProcess.WaitForExitAsync(ct);
-                result = ParseTestResults(testOutput, result, code);
-            }
-
-            return result;
+        using var testProcess = Process.Start(testInfo);
+        if (testProcess != null)
+        {
+            string testOutput = await testProcess.StandardOutput.ReadToEndAsync(ct);
+            await testProcess.WaitForExitAsync(ct);
+            result = ParseTestResults(testOutput, result, code);
         }
-        catch (Exception ex)
+
+        return result;
+    }
+    catch (Exception ex)
+    {
+        return new CodeValidationResult(false, ex.Message, new() { new("error", $"Docker validator crashed: {ex.Message}", null, null) }, code);
+    }
+    finally
+    {
+        if (Directory.Exists(tempDir))
         {
-            return new CodeValidationResult(false, ex.Message, new() { new("error", $"Критический сбой Docker-валидатора: {ex.Message}", null, null) }, code);
-        }
-        finally
-        {
-            if (Directory.Exists(tempDir))
-            {
-                try { Directory.Delete(tempDir, true); } catch { }
-            }
+            try { Directory.Delete(tempDir, true); } catch { }
         }
     }
+}
 
     private async Task PrepareCargoProject(string path, string code, CancellationToken ct)
     {

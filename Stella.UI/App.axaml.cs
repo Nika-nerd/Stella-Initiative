@@ -24,7 +24,7 @@ public partial class App : Application
     {
         var services = new ServiceCollection();
 
-        services.AddHttpClient<ILLMService, GeminiAPIService>(client =>
+        services.AddHttpClient<ILLMService, LLMAPIService>(client =>
         {
             client.Timeout = TimeSpan.FromMinutes(10);
         });

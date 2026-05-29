@@ -7,113 +7,175 @@
         Title="Stella" Background="#1E1E1E" RequestedThemeVariant="Dark"
         Width="1150" Height="650">
 
-    <Grid ColumnDefinitions="*, 320" Margin="20">
-        
-        <Grid Grid.Column="0" RowDefinitions="Auto, *, Auto" Margin="0,0,10,0">
-            <StackPanel Grid.Row="0" Spacing="10">
-                <TextBlock Text="🌟 Stella Project" FontSize="24" Foreground="#61AFEF"/>
-                
-                <TextBox Name="InputBox" Text="{Binding UserPrompt, Mode=TwoWay}"
-                         Height="120" Watermark="Введите задачу..." AcceptsReturn="True" TextWrapping="Wrap"/>
-               
-                <Button Name="GenButton" 
-                        Click="OnGenButtonClick"
-                        IsEnabled="{Binding !IsBusy}"
-                        Content="Сгенерировать" 
-                        HorizontalAlignment="Stretch"/>
-            </StackPanel>
+    <Grid>
+        <Grid ColumnDefinitions="*, 320" Margin="20">
+            
+            <Grid Grid.Column="0" RowDefinitions="Auto, *, Auto" Margin="0,0,10,0">
+                <StackPanel Grid.Row="0" Spacing="10">
+                    <TextBlock Text="🌟 Stella Project" FontSize="24" Foreground="#61AFEF"/>
+                    
+                    <Grid ColumnDefinitions="*, Auto" Margin="0,5">
+                        <TextBox Grid.Column="0" 
+                                 Watermark="No Rust project directory selected..." 
+                                 Text="{Binding ProjectPath}" 
+                                 IsReadOnly="True" 
+                                 VerticalContentAlignment="Center"
+                                 Background="#151515"
+                                 BorderBrush="#2D2D2D"/>
+                        <Button Grid.Column="1" 
+                                Content="📁 Browse" 
+                                Click="OnSelectFolderClick" 
+                                Margin="5,0,0,0"
+                                Background="#3e3e42"
+                                Cursor="Hand"/>
+                    </Grid>
+                    
+                    <TextBox Name="InputBox" Text="{Binding UserPrompt, Mode=TwoWay}"
+                             Height="120" Watermark="Enter your task instructions..." AcceptsReturn="True" TextWrapping="Wrap"/>
+                   
+                    <Button Name="GenButton" 
+                            Click="OnGenButtonClick"
+                            IsEnabled="{Binding !IsBusy}"
+                            Content="Generate &amp; Compile" 
+                            HorizontalAlignment="Stretch"/>
+                </StackPanel>
 
-            <StackPanel Grid.Row="1" Margin="0,20,0,0">
-                <TextBlock Text="{Binding ValidationStatus}" 
-                           Foreground="#E06C75" 
-                           FontWeight="Bold"
-                           Margin="0,0,0,10"
-                           HorizontalAlignment="Center"/>
-                
-                <Button Name="CopyButton"
-                        Content="Копировать код"
-                        Click="OnCopyButtonClick"
-                        Padding="10,5"
-                        Background="#3e3e42"
-                        Foreground="White"
-                        FontSize="12"
-                        Cursor="Hand"/>
+                <StackPanel Grid.Row="1" Margin="0,20,0,0">
+                    <TextBlock Text="{Binding ValidationStatus}" 
+                               Foreground="#E06C75" 
+                               FontWeight="Bold"
+                               Margin="0,0,0,10"
+                               HorizontalAlignment="Center"/>
+                    
+                    <StackPanel Orientation="Horizontal" Spacing="10" Margin="0,0,0,10">
+                        <Button Name="CopyButton"
+                                Content="📋 Copy Code"
+                                Click="OnCopyButtonClick"
+                                Padding="10,5"
+                                Background="#3e3e42"
+                                Foreground="White"
+                                FontSize="12"
+                                Cursor="Hand"/>
 
-                <Border Background="#151515" CornerRadius="5" Margin="0, 10, 0,0" BorderBrush="#2D2D2D" BorderThickness="1">
-                    <ScrollViewer Height="320">
-                        <SelectableTextBlock Name="OutputBlock" Text="{Binding GeneratedCode}" 
-                                             FontFamily="Courier New, DejaVu Sans Mono, Monospace"
-                                             FontSize="14"
-                                             Foreground="#DCDCAA"
-                                             Padding="15" 
-                                             TextWrapping="Wrap"/>
-                    </ScrollViewer>
-                </Border>
-            </StackPanel>
+                        <Button Name="LogButton"
+                                Content="⚠️ Show Error Log"
+                                Click="OnOpenLogClick"
+                                IsEnabled="{Binding HasErrors}"
+                                Padding="10,5"
+                                Background="#E06C75"
+                                Foreground="Black"
+                                FontWeight="SemiBold"
+                                FontSize="12"
+                                Cursor="Hand"/>
+                    </StackPanel>
+
+                    <Border Background="#151515" CornerRadius="5" BorderBrush="#2D2D2D" BorderThickness="1">
+                        <ScrollViewer Height="320">
+                            <SelectableTextBlock Name="OutputBlock" Text="{Binding GeneratedCode}" 
+                                                 FontFamily="Courier New, DejaVu Sans Mono, Monospace"
+                                                 FontSize="14"
+                                                 Foreground="#DCDCAA"
+                                                 Padding="15" 
+                                                 TextWrapping="Wrap"/>
+                        </ScrollViewer>
+                    </Border>
+                </StackPanel>
+            </Grid>
+
+            <Border Grid.Column="1" Background="#252526" BorderBrush="#3F3F46" BorderThickness="1" CornerRadius="5" Padding="15" Margin="10,0,0,0">
+                <ScrollViewer HorizontalScrollBarVisibility="Disabled" VerticalScrollBarVisibility="Auto">
+                    <StackPanel Spacing="20">
+                        
+                        <StackPanel Spacing="5">
+                            <TextBlock Text="STELLA PROJECT BLUEPRINT" FontSize="12" FontWeight="Bold" Foreground="#61AFEF"/>
+                            <Rectangle Height="1" Fill="#3F3F46" Margin="0,5"/>
+                            
+                            <TextBlock Text="{Binding ProjectName, FallbackValue='Project: Undefined'}" Foreground="White" FontWeight="SemiBold" FontSize="13"/>
+                            <TextBlock Text="{Binding RustEdition, FallbackValue='Edition: unknown'}" Foreground="#8C8C8C" FontSize="11"/>
+                        </StackPanel>
+
+                        <StackPanel Spacing="5">
+                            <TextBlock Text="📦 Dependencies (Cargo.toml):" Foreground="#9CDCFE" FontSize="12" FontWeight="SemiBold"/>
+                            <ItemsControl ItemsSource="{Binding Dependencies}">
+                                <ItemsControl.ItemTemplate>
+                                    <DataTemplate>
+                                        <TextBlock Text="{Binding}" Foreground="#CE9178" Margin="10,2,0,2" FontSize="11"/>
+                                    </DataTemplate>
+                                </ItemsControl.ItemTemplate>
+                            </ItemsControl>
+                        </StackPanel>
+
+                        <StackPanel Spacing="5">
+                            <TextBlock Text="🗂 Module Structure &amp; API:" Foreground="#9CDCFE" FontSize="12" FontWeight="SemiBold"/>
+                            
+                            <ItemsControl ItemsSource="{Binding Modules}">
+                                <ItemsControl.ItemTemplate>
+                                    <DataTemplate>
+                                        <Border Background="#1E1E1E" CornerRadius="4" Padding="8" Margin="0,4" BorderBrush="#3F3F46" BorderThickness="1">
+                                            <StackPanel Spacing="4">
+                                                
+                                                <TextBlock Text="{Binding FilePath}" Foreground="#4EC9B0" FontWeight="Bold" FontSize="12"/>
+                                                
+                                                <TextBlock Text="Internal Imports:" Foreground="#8C8C8C" FontSize="10" Margin="2,4,0,0"/>
+                                                <ItemsControl ItemsSource="{Binding InternalImports}">
+                                                    <ItemsControl.ItemTemplate>
+                                                        <DataTemplate>
+                                                            <TextBlock Text="{Binding}" Foreground="#569CD6" FontSize="10" FontFamily="Consolas,Monospace" Margin="8,1,0,1"/>
+                                                        </DataTemplate>
+                                                    </ItemsControl.ItemTemplate>
+                                                </ItemsControl>
+
+                                                <TextBlock Text="Detected Public API:" Foreground="#8C8C8C" FontSize="10" Margin="2,4,0,0"/>
+                                                <ItemsControl ItemsSource="{Binding PublicApi}">
+                                                    <ItemsControl.ItemTemplate>
+                                                        <DataTemplate>
+                                                            <TextBlock Text="{Binding}" Foreground="#DCDCDC" FontFamily="Consolas,Monospace" FontSize="10" Margin="8,2,0,2"/>
+                                                        </DataTemplate>
+                                                    </ItemsControl.ItemTemplate>
+                                                </ItemsControl>
+                                                
+                                            </StackPanel>
+                                        </Border>
+                                    </DataTemplate>
+                                </ItemsControl.ItemTemplate>
+                            </ItemsControl>
+                        </StackPanel>
+
+                    </StackPanel>
+                </ScrollViewer>
+            </Border>
+            
         </Grid>
 
-        <Border Grid.Column="1" Background="#252526" BorderBrush="#3F3F46" BorderThickness="1" CornerRadius="5" Padding="15" Margin="10,0,0,0">
-            <ScrollViewer HorizontalScrollBarVisibility="Disabled" VerticalScrollBarVisibility="Auto">
-                <StackPanel Spacing="20">
+        <Grid Name="ErrorLogOverlay" Background="#C0000000" IsVisible="False">
+            <Border Background="#1E1E24" Width="850" Height="500" 
+                    CornerRadius="8" BorderBrush="#E06C75" BorderThickness="1"
+                    HorizontalAlignment="Center" VerticalAlignment="Center"
+                    BoxShadow="0 10 30 0 #000000">
+                <Grid RowDefinitions="Auto, *, Auto" Margin="20">
                     
-                    <StackPanel Spacing="5">
-                        <TextBlock Text="MAP КАРТА ПРОЕКТА STELLA" FontSize="12" FontWeight="Bold" Foreground="#61AFEF"/>
-                        <Rectangle Height="1" Fill="#3F3F46" Margin="0,5"/>
-                        
-                        <TextBlock Text="{Binding ProjectName, FallbackValue='Проект: Не определен'}" Foreground="White" FontWeight="SemiBold" FontSize="13"/>
-                        <TextBlock Text="{Binding RustEdition, FallbackValue='Edition: unknown'}" Foreground="#8C8C8C" FontSize="11"/>
-                    </StackPanel>
+                    <Grid Grid.Row="0" ColumnDefinitions="*, Auto">
+                        <StackPanel Grid.Column="0" Orientation="Horizontal" Spacing="10">
+                            <TextBlock Text="📋 Stella Compilation &amp; Diagnostics Journal" FontSize="18" FontWeight="Bold" Foreground="#E06C75"/>
+                        </StackPanel>
+                        <Button Grid.Column="1" Content="✕" Click="OnCloseLogClick" Background="Transparent" Foreground="#7F848E" FontSize="16" Cursor="Hand"/>
+                    </Grid>
 
-                    <StackPanel Spacing="5">
-                        <TextBlock Text="📦 Зависимости (Cargo.toml):" Foreground="#9CDCFE" FontSize="12" FontWeight="SemiBold"/>
-                        <ItemsControl ItemsSource="{Binding Dependencies}">
-                            <ItemsControl.ItemTemplate>
-                                <DataTemplate>
-                                    <TextBlock Text="{Binding}" Foreground="#CE9178" Margin="10,2,0,2" FontSize="11"/>
-                                </DataTemplate>
-                            </ItemsControl.ItemTemplate>
-                        </ItemsControl>
-                    </StackPanel>
+                    <Border Grid.Row="1" Background="#111115" CornerRadius="4" Margin="0,15" BorderBrush="#2D2D30" BorderThickness="1">
+                        <ScrollViewer>
+                            <SelectableTextBlock Text="{Binding DetailedErrorLog}" 
+                                                 FontFamily="Consolas, Courier New, DejaVu Sans Mono, Monospace" 
+                                                 FontSize="12" 
+                                                 Foreground="#DCDCDC" 
+                                                 Padding="15"
+                                                 TextWrapping="Wrap"/>
+                        </ScrollViewer>
+                    </Border>
 
-                    <StackPanel Spacing="5">
-                        <TextBlock Text="🗂 Структура модулей и API:" Foreground="#9CDCFE" FontSize="12" FontWeight="SemiBold"/>
-                        
-                        <ItemsControl ItemsSource="{Binding Modules}">
-                            <ItemsControl.ItemTemplate>
-                                <DataTemplate>
-                                    <Border Background="#1E1E1E" CornerRadius="4" Padding="8" Margin="0,4" BorderBrush="#3F3F46" BorderThickness="1">
-                                        <StackPanel Spacing="4">
-                                            
-                                            <TextBlock Text="{Binding FilePath}" Foreground="#4EC9B0" FontWeight="Bold" FontSize="12"/>
-                                            
-                                            <TextBlock Text="Внутренние импорты:" Foreground="#8C8C8C" FontSize="10" Margin="2,4,0,0"/>
-                                            <ItemsControl ItemsSource="{Binding InternalImports}">
-                                                <ItemsControl.ItemTemplate>
-                                                    <DataTemplate>
-                                                        <TextBlock Text="{Binding}" Foreground="#569CD6" FontSize="10" FontFamily="Consolas,Monospace" Margin="8,1,0,1"/>
-                                                    </DataTemplate>
-                                                </ItemsControl.ItemTemplate>
-                                            </ItemsControl>
-
-                                            <TextBlock Text="Обнаруженный публичный API:" Foreground="#8C8C8C" FontSize="10" Margin="2,4,0,0"/>
-                                            <ItemsControl ItemsSource="{Binding PublicApi}">
-                                                <ItemsControl.ItemTemplate>
-                                                    <DataTemplate>
-                                                        <TextBlock Text="{Binding}" Foreground="#DCDCDC" FontFamily="Consolas,Monospace" FontSize="10" Margin="8,2,0,2"/>
-                                                    </DataTemplate>
-                                                </ItemsControl.ItemTemplate>
-                                            </ItemsControl>
-                                            
-                                        </StackPanel>
-                                    </Border>
-                                </DataTemplate>
-                            </ItemsControl.ItemTemplate>
-                        </ItemsControl>
-                    </StackPanel>
-
-                </StackPanel>
-            </ScrollViewer>
-        </Border>
-        
+                    <Button Grid.Row="2" Content="Close Journal" Click="OnCloseLogClick" 
+                            HorizontalAlignment="Right" Padding="16,8" Background="#3e3e42" Foreground="White" FontWeight="SemiBold" Cursor="Hand"/>
+                </Grid>
+            </Border>
+        </Grid>
     </Grid>
 </Window>

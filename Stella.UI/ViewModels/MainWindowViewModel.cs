@@ -19,12 +19,21 @@ public class MainWindowViewModel : ViewModelBase
     private readonly IProjectAnalyzer _projectAnalyzer;
     
     private string? _userPrompt = string.Empty;
-    private string? _generatedCode = "Введите запрос и нажмите 'Сгенерировать'";
+    private string? _generatedCode = "Enter your query and click 'Generate'";
     private string? _validationStatus = string.Empty;
     private bool _isBusy;
-    private string _projectName = "Проект: Не определен";
+    private string _projectName = "Project: Not defined";
     private string _rustEdition = "Edition: unknown";
+    private string _projectPath = string.Empty;
+    private string _detailedErrorLog = string.Empty;
+    private bool _hasErrors;
+    public bool HasErrors { get => _hasErrors; set => this.RaiseAndSetIfChanged(ref _hasErrors, value); }
 
+    
+    
+    public string DetailedErrorLog { get => _detailedErrorLog; set => this.RaiseAndSetIfChanged(ref _detailedErrorLog, value); }
+
+    public string ProjectPath { get => _projectPath; set => this.RaiseAndSetIfChanged(ref _projectPath, value); }
     public bool IsBusy { get => _isBusy; set => this.RaiseAndSetIfChanged(ref _isBusy, value); }
     public string? ValidationStatus { get => _validationStatus; set => this.RaiseAndSetIfChanged(ref _validationStatus, value); }
     public string? UserPrompt { get => _userPrompt; set => this.RaiseAndSetIfChanged(ref _userPrompt, value); }
@@ -50,182 +59,216 @@ public class MainWindowViewModel : ViewModelBase
         set => this.RaiseAndSetIfChanged(ref _currentProjectMap, value);
     }
     
-    public async Task StartGenerationProcess()
-    {
-        if (string.IsNullOrWhiteSpace(UserPrompt) || IsBusy) return;
-
-        IsBusy = true;
-        int maxAttempts = 3;
-        int currentAttempt = 0;
-        string? lastPureCode = null;
-        
-        string currentProjectPath = "/Users/aliserik/RustroverProjects/guessing_game"; 
-        string defaultTargetFile = "src/main.rs"; 
-
-        string sessionHistoryFile = Path.Combine(Path.GetTempPath(), $"stella_error_memory_{Guid.NewGuid()}.tmp");
-
-        try
-        {
-            UpdateStatus("🗺 Сборка карты проекта...");
-            var blueprint = await _projectAnalyzer.AnalyzeProjectAsync(currentProjectPath);
-
-            Dispatcher.UIThread.Post(() => {
-                ProjectName = $"Проект: {blueprint.ProjectName}";
-                RustEdition = $"Edition: {blueprint.RustEdition}";
     
-                Dependencies.Clear();
-                foreach (var dep in blueprint.Dependencies) Dependencies.Add($"• {dep}");
 
-                Modules.Clear();
-                foreach (var kvp in blueprint.ModulesGraph)
+
+
+public async Task StartGenerationProcess()
+{
+    if (string.IsNullOrWhiteSpace(UserPrompt) || IsBusy) return;
+    if (string.IsNullOrWhiteSpace(ProjectPath) || !Directory.Exists(ProjectPath))
+    {
+        UpdateStatus("❌ Please select a valid project directory first!");
+        return;
+    }
+
+    IsBusy = true;
+    
+    Dispatcher.UIThread.Post(() => {
+        DetailedErrorLog = string.Empty;
+        HasErrors = false;
+    });
+
+    int maxAttempts = 3;
+    int currentAttempt = 0;
+    string? lastPureCode = null;
+    
+    string currentProjectPath = ProjectPath; 
+    string defaultTargetFile = "src/main.rs"; 
+
+    var memoryLogBuilder = new StringBuilder();
+
+    try
+    {
+        UpdateStatus("🗺 Indexing project structure...");
+        var blueprint = await _projectAnalyzer.AnalyzeProjectAsync(currentProjectPath);
+
+        Dispatcher.UIThread.Post(() => {
+            ProjectName = $"Project: {blueprint.ProjectName}";
+            RustEdition = $"Edition: {blueprint.RustEdition}";
+            Dependencies.Clear();
+            foreach (var dep in blueprint.Dependencies) Dependencies.Add($"• {dep}");
+            Modules.Clear();
+            foreach (var kvp in blueprint.ModulesGraph)
+            {
+                var apiSummary = new List<string>();
+                if (kvp.Value.PublicStructs.Any()) apiSummary.Add($"Structs: {string.Join(", ", kvp.Value.PublicStructs)}");
+                if (kvp.Value.PublicEnums.Any()) apiSummary.Add($"Enums: {string.Join(", ", kvp.Value.PublicEnums)}");
+                if (kvp.Value.PublicTraits.Any()) apiSummary.Add($"Traits: {string.Join(", ", kvp.Value.PublicTraits)}");
+                if (kvp.Value.PublicFunctions.Any()) apiSummary.Add($"Fns: {string.Join(", ", kvp.Value.PublicFunctions)}");
+
+                string typePrefix = kvp.Value.Type switch
                 {
-                    Modules.Add(new ModuleItemViewModel
+                    ModuleType.BinaryRoot => "🚀 [BIN] ",
+                    ModuleType.LibraryRoot => "📚 [LIB] ",
+                    ModuleType.IntegrationTest => "🧪 [TEST] ",
+                    ModuleType.Benchmark => "⏱️ [BENCH] ",
+                    _ => "📄 "
+                };
+
+                Modules.Add(new ModuleItemViewModel { FilePath = $"{typePrefix}{kvp.Key}", InternalImports = kvp.Value.UsesInternal, PublicApi = apiSummary });
+            }
+        });
+
+        while (currentAttempt < maxAttempts)
+        {
+            currentAttempt++;
+            double targetTemperature = (currentAttempt == 1) ? 0.0 : 0.2; 
+
+            UpdateStatus($"⏳ Generation attempt {currentAttempt}/{maxAttempts}...");
+            if (currentAttempt > 1) await Task.Delay(1000); 
+            
+            var iterationPromptBuilder = new StringBuilder();
+            
+            if (currentAttempt == 1)
+            {
+                string targetFile = defaultTargetFile;
+                foreach (var fileKey in blueprint.ModulesGraph.Keys)
+                {
+                    if (UserPrompt.Contains(Path.GetFileName(fileKey), StringComparison.OrdinalIgnoreCase))
                     {
-                        FilePath = kvp.Key,
-                        InternalImports = kvp.Value.UsesInternal,
-                        PublicApi = kvp.Value.PublicDefinitions
-                    });
+                        targetFile = fileKey;
+                        break;
+                    }
                 }
+
+                string targetFileFullPath = Path.Combine(currentProjectPath, targetFile);
+                string targetFileCode = File.Exists(targetFileFullPath) ? await File.ReadAllTextAsync(targetFileFullPath) : "";
+                string relatedDefinitions = await _projectAnalyzer.TraceAndExtractDependenciesAsync(currentProjectPath, blueprint, targetFile);
+
+                iterationPromptBuilder.AppendLine("=== PROJECT BLUEPRINT ===");
+                iterationPromptBuilder.AppendLine($"Project: {blueprint.ProjectName}, Edition: {blueprint.RustEdition}");
+                iterationPromptBuilder.AppendLine($"Dependencies: {string.Join(", ", blueprint.Dependencies)}");
+                iterationPromptBuilder.AppendLine("=========================\n");
+
+                if (!string.IsNullOrEmpty(relatedDefinitions))
+                {
+                    iterationPromptBuilder.AppendLine("=== RELATED TYPES & STRUCTS ===");
+                    iterationPromptBuilder.AppendLine(relatedDefinitions);
+                    iterationPromptBuilder.AppendLine("===============================\n");
+                }
+
+                iterationPromptBuilder.AppendLine($"Active File Context ({targetFile}):");
+                iterationPromptBuilder.AppendLine("```rust");
+                iterationPromptBuilder.AppendLine(targetFileCode);
+                iterationPromptBuilder.AppendLine(" ```\n");
+
+                iterationPromptBuilder.AppendLine($"Task: {UserPrompt}");
+                iterationPromptBuilder.AppendLine("Apply the changes to the Active File Context. Return the FULL updated code for this file.");
+            }
+            else
+            {
+                iterationPromptBuilder.AppendLine($"Task: {UserPrompt}\n");
+                iterationPromptBuilder.AppendLine("Your previous code modifications failed compilation. Review the history of failed attempts below and avoid repeating these mistakes.");
+                iterationPromptBuilder.AppendLine("=== FAILED ATTEMPTS HISTORY ===");
+                iterationPromptBuilder.AppendLine(memoryLogBuilder.ToString());
+                iterationPromptBuilder.AppendLine("===============================\n");
+                
+                string hints = GenerateSmartHints(memoryLogBuilder.ToString());
+                iterationPromptBuilder.AppendLine($"💡 Critical Hint:\n{hints}");
+                iterationPromptBuilder.AppendLine("\nCRITICAL: Do NOT output [ANALYSIS & PLANNING] this time. Return ONLY the fully corrected code execution block inside a single ```rust ... ``` block.");
+            }
+            
+            var response = await _llmService.GenerateCodeAsync(iterationPromptBuilder.ToString(), currentAttempt, targetTemperature);
+            var newPureCode = ExtractCode(response);
+
+            if (string.IsNullOrWhiteSpace(newPureCode) || !newPureCode.Contains('{') || !newPureCode.Contains('}')) 
+            {
+                UpdateStatus("⚠️ Received corrupted code layout. Retrying generation...");
+                AppendErrorToMemory(memoryLogBuilder, currentAttempt, "None", "System forced regeneration due to broken markdown code block structure.");
+                continue;
+            }
+
+            if (newPureCode == lastPureCode)
+            {
+                UpdateStatus("⚠️ Model stuck in an infinite error loop. Aborting pipeline.");
+                break;
+            }
+
+            lastPureCode = newPureCode;
+            Dispatcher.UIThread.Post(() => GeneratedCode = response); 
+
+            UpdateStatus($"🔍 Running cargo validation (Attempt {currentAttempt})...");
+            var result = await _validator.ValidateAsync(newPureCode);
+            
+            if (result.IsSuccess)
+            {
+                UpdateStatus("✅ Success! Code compiled cleanly and passed all local tests.");
+                break;
+            }
+
+            AppendErrorToMemory(memoryLogBuilder, currentAttempt, newPureCode, result.RawOutput);
+            
+            Dispatcher.UIThread.Post(() => {
+                DetailedErrorLog = memoryLogBuilder.ToString();
+                HasErrors = true;
             });
 
-            while (currentAttempt < maxAttempts)
+            if (currentAttempt == maxAttempts)
             {
-                currentAttempt++;
-                double targetTemperature = (currentAttempt == 1) ? 0.0 : 0.2; 
-
-                UpdateStatus($"⏳ Попытка {currentAttempt}/{maxAttempts}...");
-                if (currentAttempt > 1) await Task.Delay(1000); 
-                
-                var iterationPromptBuilder = new StringBuilder();
-                
-                if (currentAttempt == 1)
-                {
-                    string targetFile = defaultTargetFile;
-                    
-                    foreach (var fileKey in blueprint.ModulesGraph.Keys)
-                    {
-                        if (UserPrompt.Contains(Path.GetFileName(fileKey), StringComparison.OrdinalIgnoreCase))
-                        {
-                            targetFile = fileKey;
-                            break;
-                        }
-                    }
-
-                    string targetFileFullPath = Path.Combine(currentProjectPath, targetFile);
-                    string targetFileCode = File.Exists(targetFileFullPath) ? await File.ReadAllTextAsync(targetFileFullPath) : "";
-                    string relatedDefinitions = await _projectAnalyzer.TraceAndExtractDependenciesAsync(currentProjectPath, blueprint, targetFile);
-
-                    iterationPromptBuilder.AppendLine("=== PROJECT BLUEPRINT ===");
-                    iterationPromptBuilder.AppendLine($"Project: {blueprint.ProjectName}, Edition: {blueprint.RustEdition}");
-                    iterationPromptBuilder.AppendLine($"Dependencies: {string.Join(", ", blueprint.Dependencies)}");
-                    iterationPromptBuilder.AppendLine("=========================\n");
-
-                    if (!string.IsNullOrEmpty(relatedDefinitions))
-                    {
-                        iterationPromptBuilder.AppendLine("=== RELATED TYPES & STRUCTS ===");
-                        iterationPromptBuilder.AppendLine(relatedDefinitions);
-                        iterationPromptBuilder.AppendLine("===============================\n");
-                    }
-
-                    iterationPromptBuilder.AppendLine($"Active File Context ({targetFile}):");
-                    iterationPromptBuilder.AppendLine("```rust");
-                    iterationPromptBuilder.AppendLine(targetFileCode);
-                    iterationPromptBuilder.AppendLine("```\n");
-
-                    iterationPromptBuilder.AppendLine($"Task: {UserPrompt}");
-                    iterationPromptBuilder.AppendLine("Apply the changes to the Active File Context. Return the FULL updated code for this file.");
-                }
-                else
-                {
-                    string errorLedger = await File.ReadAllTextAsync(sessionHistoryFile);
-
-                    iterationPromptBuilder.AppendLine($"Task: {UserPrompt}\n");
-                    iterationPromptBuilder.AppendLine("Your previous code modifications failed compilation. Review the history of failed attempts below and avoid repeating these mistakes.");
-                    iterationPromptBuilder.AppendLine("=== FAILED ATTEMPTS HISTORY ===");
-                    iterationPromptBuilder.AppendLine(errorLedger);
-                    iterationPromptBuilder.AppendLine("===============================\n");
-                    
-                    string hints = GenerateSmartHints(errorLedger);
-                    iterationPromptBuilder.AppendLine($"💡 Critical Hint:\n{hints}");
-                    iterationPromptBuilder.AppendLine("\nCRITICAL: Do NOT output [ANALYSIS & PLANNING] this time. Return ONLY the fully corrected code execution block inside a single ```rust ... ``` block.");
-                }
-                
-                var response = await _llmService.GenerateCodeAsync(iterationPromptBuilder.ToString(), currentAttempt, targetTemperature);
-                var newPureCode = ExtractCode(response);
-
-                if (string.IsNullOrWhiteSpace(newPureCode) || !newPureCode.Contains('{') || !newPureCode.Contains('}')) 
-                {
-                    UpdateStatus("⚠️ Получен поврежденный код. Перегенерация...");
-                    await AppendErrorToMemoryAsync(sessionHistoryFile, currentAttempt, "None", "System forced regeneration due to corrupted layout.");
-                    continue;
-                }
-
-                if (newPureCode == lastPureCode)
-                {
-                    UpdateStatus("⚠️ Модель зациклилась на одной версии кода. Остановка пайплайна.");
-                    break;
-                }
-
-                lastPureCode = newPureCode;
-                GeneratedCode = response; 
-
-                UpdateStatus($"🔍 Верификация кода (Итерация {currentAttempt})...");
-                var result = await _validator.ValidateAsync(newPureCode);
-                
-                if (result.IsSuccess)
-                {
-                    UpdateStatus("✅ Успех! Код скомпилирован и успешно прошел тесты.");
-                    break;
-                }
-
-                await AppendErrorToMemoryAsync(sessionHistoryFile, currentAttempt, newPureCode, result.RawOutput);
-
-                if (currentAttempt == maxAttempts)
-                {
-                    UpdateStatus($"❌ Не удалось исправить за {maxAttempts} попыток. Проверьте лог ошибок.");
-                }
+                UpdateStatus($"❌ Pipeline failed after {maxAttempts} attempts. Check the error log.");
             }
-        }
-        catch (Exception ex)
-        {
-            GeneratedCode = $"❌ Ошибка пайплайна: {ex.Message}";
-            UpdateStatus("🚨 Критический сбой Stella");
-        }
-        finally
-        {
-            if (File.Exists(sessionHistoryFile))
-            {
-                try { File.Delete(sessionHistoryFile); } catch { }
-            }
-            IsBusy = false;
         }
     }
-
-    private async Task AppendErrorToMemoryAsync(string filePath, int attempt, string failedCode, string errorLog)
+    catch (Exception ex)
     {
-        var sb = new StringBuilder();
-        sb.AppendLine($"--- Attempt #{attempt} ---");
-        sb.AppendLine("[Failed Code Snippet]:");
-        
-        var codeLines = failedCode.Split('\n');
-        if (codeLines.Length > 25)
-        {
-            sb.AppendLine(string.Join("\n", codeLines.Take(12)));
-            sb.AppendLine("[... large code block truncated for brevity ...]");
-            sb.AppendLine(string.Join("\n", codeLines.Skip(codeLines.Length - 12)));
-        }
-        else
-        {
-            sb.AppendLine(failedCode);
-        }
-
-        sb.AppendLine("[Compiler/Test Error Output]:");
-        var cleanLog = string.Join("\n", errorLog.Split('\n').Take(10)); 
-        sb.AppendLine(cleanLog);
-        sb.AppendLine();
-
-        await File.AppendAllTextAsync(filePath, sb.ToString());
+        Dispatcher.UIThread.Post(() => GeneratedCode = $"❌ Critical Pipeline Error: {ex.Message}");
+        UpdateStatus("🚨 Stella internal engine panic");
     }
+    finally
+    {
+        IsBusy = false;
+    }
+}
+
+private void AppendErrorToMemory(StringBuilder builder, int attempt, string failedCode, string errorLog)
+{
+    builder.AppendLine($"======================================================================");
+    builder.AppendLine($"❌ FAILED ATTEMPT #{attempt} — Compilation / Test Pipeline Error");
+    builder.AppendLine($"======================================================================");
+    builder.AppendLine("[Generated Broken Source Code Context]:");
+    
+    var lines = failedCode.Split('\n');
+    if (lines.Length > 20)
+    {
+        builder.AppendLine(string.Join("\n", lines.Take(10)));
+        builder.AppendLine("\t// ... [source lines truncated for log readability] ...");
+        builder.AppendLine(string.Join("\n", lines.Skip(lines.Length - 10)));
+    }
+    else
+    {
+        builder.AppendLine(failedCode);
+    }
+
+    builder.AppendLine("\n[Raw Diagnostic Output from rustc / cargo / clippy]:");
+    builder.AppendLine(string.IsNullOrWhiteSpace(errorLog) ? "No diagnostic output available from the child process wrapper." : errorLog);
+    builder.AppendLine("\n");
+}
+
+private async Task AppendErrorToMemoryAsync(string filePath, int attempt, string failedCode, string errorLog)
+{
+    var sb = new StringBuilder();
+    sb.AppendLine($"--- FAILED ATTEMPT #{attempt} ---");
+    sb.AppendLine("[The Code You Generated]:");
+    sb.AppendLine(failedCode); 
+    sb.AppendLine("[Compiler Error Output from rustc]:");
+    sb.AppendLine(errorLog);
+    sb.AppendLine("▲ Carefully look at the Line and Column numbers in the error above. Fix this exact location. ▲");
+    sb.AppendLine(new string('-', 30));
+    sb.AppendLine();
+
+    await File.AppendAllTextAsync(filePath, sb.ToString());
+}
 
     private string GenerateSmartHints(string logs)
     {
@@ -268,10 +311,10 @@ public class MainWindowViewModel : ViewModelBase
 
     private readonly Dictionary<string, string> _rustKnowledgeBase = new()
     {
-        { "ptr_arg", "Optimization: Use slices instead of owning containers in arguments. E.g., `&str` instead of `&String`, or `&[T]` instead of `&Vec<T>`." },
-        { "len_zero", "Style: Use `.is_empty()` method instead of comparing `.len() == 0`." },
-        { "unused_variables", "Clean code: Remove unused variable or prefix it with an underscore: `_variable`." },
-        { "redundant_clone", "Performance: Avoid allocation. Remove unnecessary `.clone()` calls where data can be borrowed." },
-        { "needless_return", "Idiomatic code: Remove `return` keyword from the end of the block; use implicit expression return." }
+        { "E0308", "CRITICAL: Type mismatch. Check expected vs found types. Use `.as_str()`, `.to_string()`, or match types explicitly." },
+        { "E0502", "CRITICAL: Borrow checker error! You cannot borrow a variable as mutable if it is already borrowed as immutable. Scope the borrows using inner blocks `{}` or drop the immutable borrow early using `drop()`." },
+        { "E0382", "CRITICAL: Value moved! The variable was moved in a previous iteration or function call. Clone the data using `.clone()` before moving, or pass it by reference `&` instead of by value." },
+        { "E0277", "CRITICAL: Trait bound not satisfied. The type does not implement the required trait. Check if you need to derive it (e.g., `#[derive(Debug, Clone)]`) or implement it manually." },
+        { "E0597", "CRITICAL: Value does not live long enough. It is dropped while still borrowed. Ensure the reference outlives the data, or return an owned type (like `String` or `Vec`) instead of a reference." }
     };
 }
