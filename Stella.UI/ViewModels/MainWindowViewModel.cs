@@ -9,6 +9,7 @@ using Stella.Core.Interfaces;
 using Avalonia.Threading;
 using Stella.Core.Models;
 using System.Collections.ObjectModel;
+using Stella.Infrastructure.Services;
 
 namespace Stella.UI.ViewModels;
 
@@ -27,6 +28,20 @@ public class MainWindowViewModel : ViewModelBase
     private string _projectPath = string.Empty;
     private string _detailedErrorLog = string.Empty;
     private bool _hasErrors;
+    private int _selectedModeIndex = 0; 
+    public int SelectedModeIndex 
+    { 
+        get => _selectedModeIndex; 
+        set {
+            this.RaiseAndSetIfChanged(ref _selectedModeIndex, value);
+            ValidationStatus = WorkMode == StellaWorkMode.Sandbox 
+                ? "✨ Sandbox Mode active" 
+                : "📁 Project Mode active (Select directory)";
+        }
+    }
+
+    public StellaWorkMode WorkMode => SelectedModeIndex == 0 ? StellaWorkMode.Sandbox : StellaWorkMode.Project;
+
     public bool HasErrors { get => _hasErrors; set => this.RaiseAndSetIfChanged(ref _hasErrors, value); }
 
     
@@ -61,14 +76,15 @@ public class MainWindowViewModel : ViewModelBase
     
     
 
-
+    
 
 public async Task StartGenerationProcess()
 {
     if (string.IsNullOrWhiteSpace(UserPrompt) || IsBusy) return;
-    if (string.IsNullOrWhiteSpace(ProjectPath) || !Directory.Exists(ProjectPath))
+    
+    if (WorkMode == StellaWorkMode.Project && (string.IsNullOrWhiteSpace(ProjectPath) || !Directory.Exists(ProjectPath)))
     {
-        UpdateStatus("❌ Please select a valid project directory first!");
+        UpdateStatus("❌ Please select a valid project directory first for Project Mode!");
         return;
     }
 
@@ -85,40 +101,68 @@ public async Task StartGenerationProcess()
     
     string currentProjectPath = ProjectPath; 
     string defaultTargetFile = "src/main.rs"; 
+    string targetFile = defaultTargetFile;
 
     var memoryLogBuilder = new StringBuilder();
 
     try
     {
-        UpdateStatus("🗺 Indexing project structure...");
-        var blueprint = await _projectAnalyzer.AnalyzeProjectAsync(currentProjectPath);
+        ProjectBlueprint? blueprint = null;
 
-        Dispatcher.UIThread.Post(() => {
-            ProjectName = $"Project: {blueprint.ProjectName}";
-            RustEdition = $"Edition: {blueprint.RustEdition}";
-            Dependencies.Clear();
-            foreach (var dep in blueprint.Dependencies) Dependencies.Add($"• {dep}");
-            Modules.Clear();
-            foreach (var kvp in blueprint.ModulesGraph)
-            {
-                var apiSummary = new List<string>();
-                if (kvp.Value.PublicStructs.Any()) apiSummary.Add($"Structs: {string.Join(", ", kvp.Value.PublicStructs)}");
-                if (kvp.Value.PublicEnums.Any()) apiSummary.Add($"Enums: {string.Join(", ", kvp.Value.PublicEnums)}");
-                if (kvp.Value.PublicTraits.Any()) apiSummary.Add($"Traits: {string.Join(", ", kvp.Value.PublicTraits)}");
-                if (kvp.Value.PublicFunctions.Any()) apiSummary.Add($"Fns: {string.Join(", ", kvp.Value.PublicFunctions)}");
+        if (WorkMode == StellaWorkMode.Project)
+        {
+            UpdateStatus("🗺 Indexing project structure...");
+            blueprint = await _projectAnalyzer.AnalyzeProjectAsync(currentProjectPath);
 
-                string typePrefix = kvp.Value.Type switch
+            Dispatcher.UIThread.Post(() => {
+                ProjectName = $"Project: {blueprint.ProjectName}";
+                RustEdition = $"Edition: {blueprint.RustEdition}";
+                Dependencies.Clear();
+                foreach (var dep in blueprint.Dependencies) Dependencies.Add($"• {dep}");
+                Modules.Clear();
+                foreach (var kvp in blueprint.ModulesGraph)
                 {
-                    ModuleType.BinaryRoot => "🚀 [BIN] ",
-                    ModuleType.LibraryRoot => "📚 [LIB] ",
-                    ModuleType.IntegrationTest => "🧪 [TEST] ",
-                    ModuleType.Benchmark => "⏱️ [BENCH] ",
-                    _ => "📄 "
-                };
+                    var apiSummary = new List<string>();
+                    if (kvp.Value.PublicStructs.Any()) apiSummary.Add($"Structs: {string.Join(", ", kvp.Value.PublicStructs)}");
+                    if (kvp.Value.PublicEnums.Any()) apiSummary.Add($"Enums: {string.Join(", ", kvp.Value.PublicEnums)}");
+                    if (kvp.Value.PublicTraits.Any()) apiSummary.Add($"Traits: {string.Join(", ", kvp.Value.PublicTraits)}");
+                    if (kvp.Value.PublicFunctions.Any()) apiSummary.Add($"Fns: {string.Join(", ", kvp.Value.PublicFunctions)}");
 
-                Modules.Add(new ModuleItemViewModel { FilePath = $"{typePrefix}{kvp.Key}", InternalImports = kvp.Value.UsesInternal, PublicApi = apiSummary });
+                    string typePrefix = kvp.Value.Type switch
+                    {
+                        ModuleType.BinaryRoot => "🚀 [BIN] ",
+                        ModuleType.LibraryRoot => "📚 [LIB] ",
+                        ModuleType.IntegrationTest => "🧪 [TEST] ",
+                        ModuleType.Benchmark => "⏱️ [BENCH] ",
+                        _ => "📄 "
+                    };
+
+                    Modules.Add(new ModuleItemViewModel { FilePath = $"{typePrefix}{kvp.Key}", InternalImports = kvp.Value.UsesInternal, PublicApi = apiSummary });
+                }
+            });
+
+            foreach (var fileKey in blueprint.ModulesGraph.Keys)
+            {
+                if (UserPrompt.Contains(Path.GetFileName(fileKey), StringComparison.OrdinalIgnoreCase))
+                {
+                    targetFile = fileKey;
+                    break;
+                }
             }
-        });
+
+            ConfigureValidator(Path.Combine(currentProjectPath, "Cargo.toml"), targetFile);
+        }
+        else
+        {
+            Dispatcher.UIThread.Post(() => {
+                ProjectName = "Project: Isolated Sandbox";
+                RustEdition = "Edition: 2021";
+                Dependencies.Clear();
+                Modules.Clear();
+            });
+            
+            ConfigureValidator(null, "src/main.rs");
+        }
 
         while (currentAttempt < maxAttempts)
         {
@@ -132,39 +176,42 @@ public async Task StartGenerationProcess()
             
             if (currentAttempt == 1)
             {
-                string targetFile = defaultTargetFile;
-                foreach (var fileKey in blueprint.ModulesGraph.Keys)
+                if (WorkMode == StellaWorkMode.Project && blueprint != null)
                 {
-                    if (UserPrompt.Contains(Path.GetFileName(fileKey), StringComparison.OrdinalIgnoreCase))
+                    string targetFileFullPath = Path.Combine(currentProjectPath, targetFile);
+                    string targetFileCode = File.Exists(targetFileFullPath) ? await File.ReadAllTextAsync(targetFileFullPath) : "";
+                    string relatedDefinitions = await _projectAnalyzer.TraceAndExtractDependenciesAsync(currentProjectPath, blueprint, targetFile);
+
+                    iterationPromptBuilder.AppendLine("=== PROJECT BLUEPRINT ===");
+                    iterationPromptBuilder.AppendLine($"Project: {blueprint.ProjectName}, Edition: {blueprint.RustEdition}");
+                    iterationPromptBuilder.AppendLine($"Dependencies: {string.Join(", ", blueprint.Dependencies)}");
+                    iterationPromptBuilder.AppendLine("=========================\n");
+
+                    if (!string.IsNullOrEmpty(relatedDefinitions))
                     {
-                        targetFile = fileKey;
-                        break;
+                        iterationPromptBuilder.AppendLine("=== RELATED TYPES & STRUCTS ===");
+                        iterationPromptBuilder.AppendLine(relatedDefinitions);
+                        iterationPromptBuilder.AppendLine("===============================\n");
                     }
+
+                    iterationPromptBuilder.AppendLine($"Active File Context ({targetFile}):");
+                    iterationPromptBuilder.AppendLine("```rust");
+                    iterationPromptBuilder.AppendLine(targetFileCode);
+                    iterationPromptBuilder.AppendLine(" ```\n");
                 }
-
-                string targetFileFullPath = Path.Combine(currentProjectPath, targetFile);
-                string targetFileCode = File.Exists(targetFileFullPath) ? await File.ReadAllTextAsync(targetFileFullPath) : "";
-                string relatedDefinitions = await _projectAnalyzer.TraceAndExtractDependenciesAsync(currentProjectPath, blueprint, targetFile);
-
-                iterationPromptBuilder.AppendLine("=== PROJECT BLUEPRINT ===");
-                iterationPromptBuilder.AppendLine($"Project: {blueprint.ProjectName}, Edition: {blueprint.RustEdition}");
-                iterationPromptBuilder.AppendLine($"Dependencies: {string.Join(", ", blueprint.Dependencies)}");
-                iterationPromptBuilder.AppendLine("=========================\n");
-
-                if (!string.IsNullOrEmpty(relatedDefinitions))
+                else
                 {
-                    iterationPromptBuilder.AppendLine("=== RELATED TYPES & STRUCTS ===");
-                    iterationPromptBuilder.AppendLine(relatedDefinitions);
-                    iterationPromptBuilder.AppendLine("===============================\n");
+                    iterationPromptBuilder.AppendLine("=== SANDBOX ISOLATED GENERATION ===");
+                    iterationPromptBuilder.AppendLine("Generate a standalone, self-contained Rust block based on the user request.");
+                    iterationPromptBuilder.AppendLine("Make sure all necessary imports and a complete `mod tests` suite are present in the single file.");
+                    iterationPromptBuilder.AppendLine("===================================\n");
                 }
-
-                iterationPromptBuilder.AppendLine($"Active File Context ({targetFile}):");
-                iterationPromptBuilder.AppendLine("```rust");
-                iterationPromptBuilder.AppendLine(targetFileCode);
-                iterationPromptBuilder.AppendLine(" ```\n");
 
                 iterationPromptBuilder.AppendLine($"Task: {UserPrompt}");
-                iterationPromptBuilder.AppendLine("Apply the changes to the Active File Context. Return the FULL updated code for this file.");
+                if (WorkMode == StellaWorkMode.Project)
+                {
+                    iterationPromptBuilder.AppendLine("Apply the changes to the Active File Context. Return the FULL updated code for this file.");
+                }
             }
             else
             {
@@ -204,6 +251,20 @@ public async Task StartGenerationProcess()
             if (result.IsSuccess)
             {
                 UpdateStatus("✅ Success! Code compiled cleanly and passed all local tests.");
+                
+                if (WorkMode == StellaWorkMode.Project)
+                {
+                    try
+                    {
+                        string finalSavePath = Path.Combine(currentProjectPath, targetFile);
+                        await File.WriteAllTextAsync(finalSavePath, newPureCode);
+                        UpdateStatus($"✅ Success! Saved modifications directly to {targetFile}");
+                    }
+                    catch (Exception saveEx)
+                    {
+                        UpdateStatus($"⚠️ Compiled, but failed to write to disk: {saveEx.Message}");
+                    }
+                }
                 break;
             }
 
@@ -228,6 +289,20 @@ public async Task StartGenerationProcess()
     finally
     {
         IsBusy = false;
+    }
+}
+
+private void ConfigureValidator(string? cargoPath, string relativeFilePath)
+{
+    if (_validator is DockerValidationService dockerService)
+    {
+        dockerService.TargetCargoTomlPath = cargoPath;
+        dockerService.TargetRelativeFilePath = relativeFilePath;
+    }
+    else if (_validator is NativeValidationService nativeService)
+    {
+        nativeService.TargetCargoTomlPath = cargoPath;
+        nativeService.TargetRelativeFilePath = relativeFilePath;
     }
 }
 

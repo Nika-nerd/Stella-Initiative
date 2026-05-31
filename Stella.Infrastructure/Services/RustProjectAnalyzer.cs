@@ -1,7 +1,10 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
+using System.Linq;
 using System.Text;
+using System.Text.Json;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
@@ -12,45 +15,66 @@ namespace Stella.Infrastructure.Services;
 
 public class RustProjectAnalyzer : IProjectAnalyzer
 {
-    private static readonly Regex ModRegex = new(@"^\s*(?:pub\s+)?mod\s+([a-zA-Z0-9_]+);", RegexOptions.Compiled);
-    private static readonly Regex UseRegex = new(@"^\s*(?:pub\s+)?use\s+(.+);", RegexOptions.Compiled);
-    
-    private static readonly Regex StructRegex = new(@"^\s*pub\s+struct\s+([a-zA-Z0-9_]+)", RegexOptions.Compiled);
-    private static readonly Regex EnumRegex = new(@"^\s*pub\s+enum\s+([a-zA-Z0-9_]+)", RegexOptions.Compiled);
-    private static readonly Regex TraitRegex = new(@"^\s*pub\s+trait\s+([a-zA-Z0-9_]+)", RegexOptions.Compiled);
-    private static readonly Regex FnRegex = new(@"^\s*pub\s+(?:async\s+)?fn\s+([a-zA-Z0-9_]+)", RegexOptions.Compiled);
+    private readonly string _lensBinaryPath;
 
-    public async Task<ProjectBlueprint> AnalyzeProjectAsync(string projectPath, CancellationToken ct = default)
+    public RustProjectAnalyzer()
     {
-        var blueprint = new ProjectBlueprint();
-
-        if (!Directory.Exists(projectPath))
-            return blueprint;
-
-        string cargoTomlPath = Path.Combine(projectPath, "Cargo.toml");
-        if (File.Exists(cargoTomlPath))
+        string homeDir = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        _lensBinaryPath = Path.Combine(homeDir, ".stella_bin", OperatingSystem.IsWindows() ? "stella_lens.exe" : "stella_lens");
+        
+        if (!File.Exists(_lensBinaryPath))
         {
-            await ParseCargoTomlAsync(cargoTomlPath, blueprint, ct);
+            _lensBinaryPath = OperatingSystem.IsWindows() ? "stella_lens.exe" : "stella_lens";
         }
-
-        var rustFiles = Directory.GetFiles(projectPath, "*.rs", SearchOption.AllDirectories);
-        foreach (var file in rustFiles)
-        {
-            ct.ThrowIfCancellationRequested();
-    
-            string relativePath = Path.GetRelativePath(projectPath, file);
-    
-            relativePath = relativePath.Replace(Path.DirectorySeparatorChar, '/');
-    
-            if (relativePath.StartsWith("target/")) continue;
-
-            var moduleInfo = await AnalyzeRustFileAsync(relativePath, file, ct);
-            blueprint.ModulesGraph[relativePath] = moduleInfo;
-        }
-
-        return blueprint;
     }
 
+   
+    public async Task<ProjectBlueprint> AnalyzeProjectAsync(string projectPath, CancellationToken ct = default)
+    {
+        if (!Directory.Exists(projectPath))
+            throw new DirectoryNotFoundException($"Target project directory not found: {projectPath}");
+
+        var startInfo = new ProcessStartInfo
+        {
+            FileName = _lensBinaryPath,
+            Arguments = $"\"{projectPath}\"",
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            CreateNoWindow = true
+        };
+
+        using var process = Process.Start(startInfo);
+        if (process == null)
+            throw new InvalidOperationException("Failed to start Stella Lens analyzer utility.");
+
+        string jsonOutput = await process.StandardOutput.ReadToEndAsync(ct);
+        string errorOutput = await process.StandardError.ReadToEndAsync(ct);
+        await process.WaitForExitAsync(ct);
+
+        if (process.ExitCode != 0 || !string.IsNullOrWhiteSpace(errorOutput))
+        {
+            throw new Exception($"Stella Lens crashed with code {process.ExitCode}. Error: {errorOutput}");
+        }
+
+        var jsonOptions = new JsonSerializerOptions
+        {
+            PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower,
+            AllowTrailingCommas = true
+        };
+
+        try
+        {
+            var blueprint = JsonSerializer.Deserialize<ProjectBlueprint>(jsonOutput, jsonOptions);
+            return blueprint ?? throw new NullReferenceException("Deserialized blueprint is null.");
+        }
+        catch (Exception ex)
+        {
+            throw new Exception($"Failed to parse token mapping map from Stella Lens. Raw JSON length: {jsonOutput.Length}. Details: {ex.Message}");
+        }
+    }
+
+    
     public async Task<string> TraceAndExtractDependenciesAsync(string projectPath, ProjectBlueprint blueprint, string targetFileRelativePath, CancellationToken ct = default)
     {
         if (!blueprint.ModulesGraph.ContainsKey(targetFileRelativePath))
@@ -62,7 +86,7 @@ public class RustProjectAnalyzer : IProjectAnalyzer
         foreach (var import in targetModule.UsesInternal)
         {
             ct.ThrowIfCancellationRequested();
-            string targetRsFile = ResolveImportToFilePath(import);
+            string targetRsFile = ResolveImportToFilePath(import, blueprint.ProjectName);
             string fullPath = Path.Combine(projectPath, targetRsFile);
 
             if (!File.Exists(fullPath)) continue;
@@ -87,9 +111,17 @@ public class RustProjectAnalyzer : IProjectAnalyzer
         return sb.ToString();
     }
 
-    private string ResolveImportToFilePath(string import)
+    private string ResolveImportToFilePath(string import, string projectName)
     {
-        string clean = import.Replace("crate::", "").Replace("super::", "");
+        string clean = import.Replace("crate::", "")
+                             .Replace("super::", "")
+                             .Replace("self::", "");
+        
+        if (!string.IsNullOrEmpty(projectName) && clean.StartsWith($"{projectName}::"))
+        {
+            clean = clean.Substring(projectName.Length + 2);
+        }
+
         var parts = clean.Split(new[] { "::" }, StringSplitOptions.RemoveEmptyEntries);
         if (parts.Length == 0) return "src/main.rs";
 
@@ -137,90 +169,5 @@ public class RustProjectAnalyzer : IProjectAnalyzer
         }
 
         return endIndex != -1 ? fileContent.Substring(startIndex, endIndex - startIndex + 1) : string.Empty;
-    }
-
-    private async Task ParseCargoTomlAsync(string filePath, ProjectBlueprint blueprint, CancellationToken ct)
-    {
-        var lines = await File.ReadAllLinesAsync(filePath, ct);
-        bool inDependencies = false;
-
-        foreach (var line in lines)
-        {
-            string trimmed = line.Trim();
-            if (string.IsNullOrEmpty(trimmed) || trimmed.StartsWith('#')) continue;
-
-            if (trimmed.StartsWith("[package]")) { inDependencies = false; continue; }
-            if (trimmed.StartsWith("[dependencies]")) { inDependencies = true; continue; }
-            if (trimmed.StartsWith("[")) { inDependencies = false; continue; }
-
-            if (!inDependencies)
-            {
-                if (trimmed.StartsWith("name"))
-                {
-                    var match = Regex.Match(trimmed, @"name\s*=\s*""([^""]+)""|name\s*=\s*'([^']+)'");
-                    if (match.Success) blueprint.ProjectName = match.Groups[1].Success ? match.Groups[1].Value : match.Groups[2].Value;
-                }
-                else if (trimmed.StartsWith("edition"))
-                {
-                    var match = Regex.Match(trimmed, @"edition\s*=\s*""([^""]+)""|edition\s*=\s*'([^']+)'");
-                    if (match.Success) blueprint.RustEdition = match.Groups[1].Success ? match.Groups[1].Value : match.Groups[2].Value;
-                }
-            }
-            else
-            {
-                var eqIndex = trimmed.IndexOf('=');
-                if (eqIndex > 0)
-                {
-                    blueprint.Dependencies.Add(trimmed.Substring(0, eqIndex).Trim());
-                }
-            }
-        }
-    }
-
-    private async Task<ModuleInfo> AnalyzeRustFileAsync(string relativePath, string absolutePath, CancellationToken ct)
-    {
-        var modInfo = new ModuleInfo();
-        
-        if (relativePath.EndsWith("src/main.rs")) modInfo.Type = ModuleType.BinaryRoot;
-        else if (relativePath.EndsWith("src/lib.rs")) modInfo.Type = ModuleType.LibraryRoot;
-        else if (relativePath.StartsWith("tests/")) modInfo.Type = ModuleType.IntegrationTest;
-        else if (relativePath.StartsWith("benches/")) modInfo.Type = ModuleType.Benchmark;
-        else modInfo.Type = ModuleType.NormalModule;
-
-        var lines = await File.ReadAllLinesAsync(absolutePath, ct);
-
-        foreach (var line in lines)
-        {
-            string trimmed = line.Trim();
-            if (string.IsNullOrEmpty(trimmed) || trimmed.StartsWith("//")) continue;
-
-            var modMatch = ModRegex.Match(line);
-            if (modMatch.Success) { modInfo.DeclaresModules.Add(modMatch.Groups[1].Value); continue; }
-
-            var useMatch = UseRegex.Match(line);
-            if (useMatch.Success)
-            {
-                string usePath = useMatch.Groups[1].Value;
-                if (usePath.StartsWith("crate::") || usePath.StartsWith("super::") || usePath.StartsWith("self::"))
-                    modInfo.UsesInternal.Add(usePath);
-                else
-                    modInfo.UsesExternal.Add(usePath);
-                continue;
-            }
-
-            var structMatch = StructRegex.Match(line);
-            if (structMatch.Success) { modInfo.PublicStructs.Add(structMatch.Groups[1].Value); continue; }
-
-            var enumMatch = EnumRegex.Match(line);
-            if (enumMatch.Success) { modInfo.PublicEnums.Add(enumMatch.Groups[1].Value); continue; }
-
-            var traitMatch = TraitRegex.Match(line);
-            if (traitMatch.Success) { modInfo.PublicTraits.Add( traitMatch.Groups[1].Value); continue; }
-
-            var fnMatch = FnRegex.Match(line);
-            if (fnMatch.Success) { modInfo.PublicFunctions.Add(fnMatch.Groups[1].Value); }
-        }
-        
-        return modInfo;
     }
 }

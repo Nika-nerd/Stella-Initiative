@@ -32,3 +32,9 @@ public class ModuleInfo
     public List<string> PublicTraits { get; set; } = new();
     public List<string> PublicFunctions { get; set; } = new();
 }
+
+public enum StellaWorkMode
+{
+    Sandbox,
+    Project
+}

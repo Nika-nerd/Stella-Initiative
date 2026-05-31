@@ -14,10 +14,13 @@ namespace Stella.Infrastructure.Services;
 
 public class NativeValidationService : ICodeValidator
 {
+    public string? TargetCargoTomlPath { get; set; }
+    public string TargetRelativeFilePath { get; set; } = "src/main.rs";
+
     public async Task<CodeValidationResult> ValidateAsync(string code, CancellationToken ct = default)
     {
         string homeDir = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-        string tempDir = Path.Combine(Path.GetTempPath(), "stella_projects", Guid.NewGuid().ToString());
+        string tempDir = Path.Combine(homeDir, ".stella_tmp", "native", Guid.NewGuid().ToString());
         Directory.CreateDirectory(tempDir);
 
         try
@@ -25,7 +28,6 @@ public class NativeValidationService : ICodeValidator
             await PrepareCargoProject(tempDir, code, ct);
 
             string cargoPath = Path.Combine(homeDir, ".cargo", "bin", OperatingSystem.IsWindows() ? "cargo.exe" : "cargo");
-
             if (!File.Exists(cargoPath)) 
             {
                 cargoPath = OperatingSystem.IsWindows() ? "cargo.exe" : "cargo";
@@ -88,10 +90,26 @@ public class NativeValidationService : ICodeValidator
 
     private async Task PrepareCargoProject(string path, string code, CancellationToken ct)
     {
-        Directory.CreateDirectory(Path.Combine(path, "src"));
-        string cargoToml = "[package]\nname = 'stella_temp'\nversion = '0.1.0'\nedition = '2021'\n\n[dependencies]\nserde = { version = '1.0', features = ['derive'] }\nserde_json = '1.0'\ntokio = { version = '1.0', features = ['full'] }\nasync-trait = '0.1'\n";
-        await File.WriteAllTextAsync(Path.Combine(path, "Cargo.toml"), cargoToml, ct);
-        await File.WriteAllTextAsync(Path.Combine(path, "src/main.rs"), code, ct);
+        string cargoTomlContent = "[package]\nname = 'stella_temp'\nversion = '0.1.0'\nedition = '2021'\n\n[dependencies]\n";
+        if (!string.IsNullOrEmpty(TargetCargoTomlPath) && File.Exists(TargetCargoTomlPath))
+        {
+            cargoTomlContent = await File.ReadAllTextAsync(TargetCargoTomlPath, ct);
+            if (cargoTomlContent.Contains("name ="))
+            {
+                cargoTomlContent = System.Text.RegularExpressions.Regex.Replace(cargoTomlContent, @"name\s*=\s*""[^""]+""", "name = \"stella_temp\"");
+            }
+        }
+
+        await File.WriteAllTextAsync(Path.Combine(path, "Cargo.toml"), cargoTomlContent, ct);
+
+        string fullTargetFilePath = Path.Combine(path, TargetRelativeFilePath);
+        string? directoryPath = Path.GetDirectoryName(fullTargetFilePath);
+        if (!string.IsNullOrEmpty(directoryPath))
+        {
+            Directory.CreateDirectory(directoryPath);
+        }
+
+        await File.WriteAllTextAsync(fullTargetFilePath, code, ct);
     }
 
     private CodeValidationResult ParseCargoErrors(string rawJson, string code)
@@ -119,13 +137,22 @@ public class NativeValidationService : ICodeValidator
                         string message = messageNode.GetProperty("message").GetString() ?? "";
                         int? lineNum = null;
                         
-                        var spans = messageNode.GetProperty("spans");
-                        if (spans.GetArrayLength() > 0) lineNum = spans[0].GetProperty("line_start").GetInt32();
+                        if (messageNode.TryGetProperty("spans", out var spans) && spans.GetArrayLength() > 0)
+                        {
+                            var firstSpan = spans[0];
+                            if (firstSpan.TryGetProperty("line_start", out var lineProp))
+                            {
+                                lineNum = lineProp.GetInt32();
+                            }
+                        }
                         
                         string errorCode = "";
-                        if (messageNode.TryGetProperty("code", out var codeProp) && !codeProp.ValueKind.Equals(JsonValueKind.Null))
+                        if (messageNode.TryGetProperty("code", out var codeProp) && codeProp.ValueKind != JsonValueKind.Null)
                         {
-                            errorCode = codeProp.GetProperty("code").GetString() ?? "";
+                            if (codeProp.TryGetProperty("code", out var innerCode))
+                            {
+                                errorCode = innerCode.GetString() ?? "";
+                            }
                         }
 
                         issues.Add(new ValidationIssue(level, message, lineNum, 0));
