@@ -31,6 +31,47 @@ struct ProjectBlueprintJson {
     modules_graph: HashMap<String, ModuleInfo>,
 }
 
+fn collect_use_paths(tree: &UseTree, current_prefix: String, out: &mut Vec<String>) {
+    match tree {
+        UseTree::Path(p) => {
+            let new_prefix = if current_prefix.is_empty() {
+                p.ident.to_string()
+            } else {
+                format!("{}::{}", current_prefix, p.ident)
+            };
+            collect_use_paths(&p.tree, new_prefix, out);
+        }
+        UseTree::Name(n) => {
+            let full_path = if current_prefix.is_empty() {
+                n.ident.to_string()
+            } else {
+                format!("{}::{}", current_prefix, n.ident)
+            };
+            out.push(full_path);
+        }
+        UseTree::Rename(r) => {
+            let full_path = if current_prefix.is_empty() {
+                r.ident.to_string()
+            } else {
+                format!("{}::{}", current_prefix, r.ident)
+            };
+            out.push(full_path);
+        }
+        UseTree::Group(g) => {
+            for item in &g.items {
+                collect_use_paths(item, current_prefix.clone(), out);
+            }
+        }
+        UseTree::Glob(_) => {
+            if !current_prefix.is_empty() {
+                out.push(format!("{}::*", current_prefix));
+            } else {
+                out.push("*".to_string());
+            }
+        }
+    }
+}
+
 struct FileAnalyzer {
     project_name: String,
     info: ModuleInfo,
@@ -66,38 +107,18 @@ impl<'ast> Visit<'ast> for FileAnalyzer {
     }
 
     fn visit_use_tree(&mut self, node: &'ast UseTree) {
-        let mut path_segments = Vec::new();
+        let mut paths = Vec::new();
+        collect_use_paths(node, String::new(), &mut paths);
+
+        for path in paths {
+            if path.starts_with("crate") || path.starts_with("self") || path.starts_with(&self.project_name) {
+                if !self.info.uses_internal.contains(&path) {
+                    self.info.uses_internal.push(path);
+                }
+            }
+        }
         
-        fn extract_root(tree: &UseTree, segments: &mut Vec<String>) {
-            match tree {
-                UseTree::Path(p) => {
-                    segments.push(p.ident.to_string());
-                    extract_root(&*p.tree, segments);
-                }
-                UseTree::Name(n) => {
-                    segments.push(n.ident.to_string());
-                }
-                UseTree::Group(g) => {
-                    if let Some(first) = g.items.iter().next() {
-                        extract_root(first, segments);
-                    }
-                }
-                _ => {}
-            }
-        }
-
-        extract_root(node, &mut path_segments);
-
-        if let Some(root_import) = path_segments.first() {
-            if root_import == "crate" || root_import == "self" || root_import == &self.project_name {
-                let full_import_path = path_segments.join("::");
-                if !self.info.uses_internal.contains(&full_import_path) {
-                    self.info.uses_internal.push(full_import_path);
-                }
-            }
-        }
-
-        visit::visit_use_tree(self, node);
+       
     }
 }
 
@@ -125,21 +146,21 @@ fn main() {
     };
 
     let package = manifest.package.expect("No [package] found in Cargo.toml");
-        let project_name = package.name;
-        
-        let edition_enum = match package.edition {
-                cargo_toml::Inheritable::Set(e) => e,
-                cargo_toml::Inheritable::Inherited { .. } => cargo_toml::Edition::E2021,
-            };
-        
-            let rust_edition = match edition_enum {
-                cargo_toml::Edition::E2015 => "2015",
-                cargo_toml::Edition::E2018 => "2018",
-                cargo_toml::Edition::E2021 => "2021",
-                _ => "2021", 
-            }.to_string();
+    let project_name = package.name;
     
-        let mut dependencies = Vec::new();
+    let edition_enum = match package.edition {
+        cargo_toml::Inheritable::Set(e) => e,
+        cargo_toml::Inheritable::Inherited { .. } => cargo_toml::Edition::E2021,
+    };
+    
+    let rust_edition = match edition_enum {
+        cargo_toml::Edition::E2015 => "2015",
+        cargo_toml::Edition::E2018 => "2018",
+        cargo_toml::Edition::E2021 => "2021",
+        _ => "2021", 
+    }.to_string();
+
+    let mut dependencies = Vec::new();
     for dep_name in manifest.dependencies.keys() {
         dependencies.push(dep_name.clone());
     }
@@ -158,7 +179,6 @@ fn main() {
                             info: ModuleInfo::default(),
                         };
 
-                      
                         analyzer.visit_file(&ast);
 
                         let file_name = path.file_name().unwrap().to_string_lossy();
@@ -186,7 +206,6 @@ fn main() {
         modules_graph,
     };
 
-    
     if let Ok(json_output) = serde_json::to_string_pretty(&blueprint) {
         println!("{}", json_output);
     }

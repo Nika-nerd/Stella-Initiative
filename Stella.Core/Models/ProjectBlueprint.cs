@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using System.Text.Json.Serialization;
 
 namespace Stella.Core.Models;
 
@@ -18,18 +19,29 @@ public enum ModuleType
     IntegrationTest, 
     Benchmark
 }
-
 public class ModuleInfo
 {
+    [JsonPropertyName("module_type")]
+    [JsonConverter(typeof(JsonStringEnumConverter))]
     public ModuleType Type { get; set; } = ModuleType.NormalModule;
+    
+    [JsonPropertyName("declares_modules")]
     public List<string> DeclaresModules { get; set; } = new();
+    
+    [JsonPropertyName("uses_external")]
     public List<string> UsesExternal { get; set; } = new();
+    
+    [JsonPropertyName("uses_internal")]
     public List<string> UsesInternal { get; set; } = new();
     
     
+    [JsonPropertyName("public_structs")]
     public List<string> PublicStructs { get; set; } = new();
+    [JsonPropertyName("public_enums")]
     public List<string> PublicEnums { get; set; } = new();
+    [JsonPropertyName("public_traits")]
     public List<string> PublicTraits { get; set; } = new();
+    [JsonPropertyName("public_functions")]
     public List<string> PublicFunctions { get; set; } = new();
 }
 

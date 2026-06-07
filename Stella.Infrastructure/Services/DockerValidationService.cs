@@ -20,100 +20,150 @@ public class DockerValidationService : ICodeValidator
     public string TargetRelativeFilePath { get; set; } = "src/main.rs";
 
     public async Task<CodeValidationResult> ValidateAsync(string code, CancellationToken ct = default)
+{
+    string baseTempDir = OperatingSystem.IsMacOS() 
+        ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".stella_tmp", "docker_val", Guid.NewGuid().ToString())
+        : Path.Combine(Path.GetTempPath(), "stella_docker_val", Guid.NewGuid().ToString());
+    
+    string tempDir = Path.GetFullPath(baseTempDir);
+    Directory.CreateDirectory(tempDir);
+
+    try
     {
-        string baseTempDir = OperatingSystem.IsMacOS() 
-            ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".stella_tmp", Guid.NewGuid().ToString())
-            : Path.Combine(Path.GetTempPath(), "stella_docker", Guid.NewGuid().ToString());
+        bool isProjectMode = !string.IsNullOrEmpty(TargetCargoTomlPath) && File.Exists(TargetCargoTomlPath);
+        if (isProjectMode)
+        {
+            string projectSrcDir = Path.GetDirectoryName(Path.GetFullPath(TargetCargoTomlPath!))!;
+            await CopyProjectStructureAsync(projectSrcDir, tempDir, code, ct);
+        }
+        else
+        {
+            await PrepareTemporaryCargoProject(tempDir, code, ct);
+        }
+
+        string homeDir = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        string cargoRegistryHost = Path.Combine(homeDir, ".cargo", "registry");
+        string cargoGitHost = Path.Combine(homeDir, ".cargo", "git");
+
+        Directory.CreateDirectory(cargoRegistryHost);
+        Directory.CreateDirectory(cargoGitHost);
+
+        string volumeCacheArgs = $"-v \"{cargoRegistryHost}\":/usr/local/cargo/registry " +
+                                 $"-v \"{cargoGitHost}\":/usr/local/cargo/git";
+
+        string dockerCmd = OperatingSystem.IsWindows() ? "docker.exe" : "docker";
         
-        string tempDir = Path.GetFullPath(baseTempDir);
-        Directory.CreateDirectory(tempDir);
+        string clippyArgs = $"run --rm -v \"{tempDir}\":/usr/src/myapp {volumeCacheArgs} -w /usr/src/myapp {ImageName} " +
+                            "cargo clippy --message-format=json --all-targets -- -W warnings -W clippy::pedantic";
 
-        try
+        string testArgs = $"run --rm -v \"{tempDir}\":/usr/src/myapp {volumeCacheArgs} -w /usr/src/myapp {ImageName} " +
+                          "cargo test --message-format=json";
+
+        var clippyInfo = new ProcessStartInfo
         {
-            await PrepareCargoProject(tempDir, code, ct);
+            FileName = dockerCmd,
+            Arguments = clippyArgs, 
+            RedirectStandardOutput = true,
+            UseShellExecute = false,
+            CreateNoWindow = true
+        };
 
-            string dockerCmd = OperatingSystem.IsWindows() ? "docker.exe" : "docker";
-            string clippyArgs = $"run --rm -v \"{tempDir}\":/usr/src/myapp -w /usr/src/myapp {ImageName} " +
-                                "cargo clippy --message-format=json --all-targets -- -W warnings -W clippy::pedantic";
-
-            var clippyInfo = new ProcessStartInfo
-            {
-                FileName = dockerCmd,
-                Arguments = clippyArgs, 
-                RedirectStandardOutput = true,
-                RedirectStandardError = false, 
-                UseShellExecute = false,
-                CreateNoWindow = true
-            };
-
-            using var clippyProcess = Process.Start(clippyInfo);
-            if (clippyProcess == null)
-                return new CodeValidationResult(false, "Docker start failed", new() { new("error", "Не удалось запустить Docker.", null, null) }, code);
-
-            string clippyOutput = await clippyProcess.StandardOutput.ReadToEndAsync(ct);
-            await clippyProcess.WaitForExitAsync(ct);
-
-            var result = ParseCargoErrors(clippyOutput, code);
-            if (!result.IsSuccess) return result;
-
-            string testArgs = $"run --rm -v \"{tempDir}\":/usr/src/myapp -w /usr/src/myapp {ImageName} " +
-                              "cargo test --message-format=json";
-
-            var testInfo = new ProcessStartInfo
-            {
-                FileName = dockerCmd,
-                Arguments = testArgs, 
-                RedirectStandardOutput = true,
-                RedirectStandardError = false, 
-                UseShellExecute = false,
-                CreateNoWindow = true
-            };
-
-            using var testProcess = Process.Start(testInfo);
-            if (testProcess != null)
-            {
-                string testOutput = await testProcess.StandardOutput.ReadToEndAsync(ct);
-                await testProcess.WaitForExitAsync(ct);
-                result = ParseTestResults(testOutput, result, code);
-            }
-
-            return result;
-        }
-        catch (Exception ex)
+        var testInfo = new ProcessStartInfo
         {
-            return new CodeValidationResult(false, ex.Message, new() { new("error", $"Docker validator crashed: {ex.Message}", null, null) }, code);
-        }
-        finally
+            FileName = dockerCmd,
+            Arguments = testArgs, 
+            RedirectStandardOutput = true,
+            UseShellExecute = false,
+            CreateNoWindow = true
+        };
+
+        using var clippyProcess = Process.Start(clippyInfo);
+        using var testProcess = Process.Start(testInfo);
+
+        if (clippyProcess == null || testProcess == null)
+            return new CodeValidationResult(false, "Docker start failed", new(), code);
+
+        Task<string> clippyTask = clippyProcess.StandardOutput.ReadToEndAsync(ct);
+        Task<string> testTask = testProcess.StandardOutput.ReadToEndAsync(ct);
+
+        await Task.WhenAll(clippyTask, testTask, clippyProcess.WaitForExitAsync(ct), testProcess.WaitForExitAsync(ct));
+
+        var clippyResult = ParseCargoErrors(clippyTask.Result, code);
+        var finalResult = ParseTestResults(testTask.Result, clippyResult, code);
+
+        return finalResult;
+    }
+    catch (Exception ex)
+    {
+        return new CodeValidationResult(false, ex.Message, new() { new("error", $"Docker validator crashed: {ex.Message}", null, null) }, code);
+    }
+    finally
+    {
+        if (Directory.Exists(tempDir))
         {
-            if (Directory.Exists(tempDir))
-            {
-                try { Directory.Delete(tempDir, true); } catch { }
-            }
+            try { Directory.Delete(tempDir, true); } catch { }
         }
     }
+}
 
-    private async Task PrepareCargoProject(string path, string code, CancellationToken ct)
+    public async Task ApplyChangesAsync(string code, CancellationToken ct = default)
     {
-        string cargoTomlContent = "[package]\nname = 'stella_temp'\nversion = '0.1.0'\nedition = '2021'\n\n[dependencies]\n";
-        if (!string.IsNullOrEmpty(TargetCargoTomlPath) && File.Exists(TargetCargoTomlPath))
-        {
-            cargoTomlContent = await File.ReadAllTextAsync(TargetCargoTomlPath, ct);
-            if (cargoTomlContent.Contains("name ="))
-            {
-                cargoTomlContent = System.Text.RegularExpressions.Regex.Replace(cargoTomlContent, @"name\s*=\s*""[^""]+""", "name = \"stella_temp\"");
-            }
-        }
+        if (string.IsNullOrEmpty(TargetCargoTomlPath)) return;
+        
+        string projectDir = Path.GetDirectoryName(Path.GetFullPath(TargetCargoTomlPath))!;
+        string fullTargetFilePath = Path.Combine(projectDir, TargetRelativeFilePath);
+        
+        string? fileDir = Path.GetDirectoryName(fullTargetFilePath);
+        if (!string.IsNullOrEmpty(fileDir)) Directory.CreateDirectory(fileDir);
+        
+        await File.WriteAllTextAsync(fullTargetFilePath, code, ct);
+    }
 
+    private async Task PrepareTemporaryCargoProject(string path, string code, CancellationToken ct)
+    {
+        string cargoTomlContent = "[package]\nname = 'stella_temp_docker'\nversion = '0.1.0'\nedition = '2021'\n\n[dependencies]\n";
         await File.WriteAllTextAsync(Path.Combine(path, "Cargo.toml"), cargoTomlContent, ct);
 
         string fullTargetFilePath = Path.Combine(path, TargetRelativeFilePath);
         string? directoryPath = Path.GetDirectoryName(fullTargetFilePath);
-        if (!string.IsNullOrEmpty(directoryPath))
-        {
-            Directory.CreateDirectory(directoryPath);
-        }
+        if (!string.IsNullOrEmpty(directoryPath)) Directory.CreateDirectory(directoryPath);
 
         await File.WriteAllTextAsync(fullTargetFilePath, code, ct);
+    }
+
+    private async Task CopyProjectStructureAsync(string sourceDir, string destDir, string newCode, CancellationToken ct)
+    {
+        string cargoToml = Path.Combine(sourceDir, "Cargo.toml");
+        if (File.Exists(cargoToml))
+        {
+            File.Copy(cargoToml, Path.Combine(destDir, "Cargo.toml"), true);
+        }
+
+        string targetFileInSandbox = Path.Combine(destDir, TargetRelativeFilePath);
+        string? sandboxFileDir = Path.GetDirectoryName(targetFileInSandbox);
+        if (!string.IsNullOrEmpty(sandboxFileDir)) Directory.CreateDirectory(sandboxFileDir);
+        
+        await File.WriteAllTextAsync(targetFileInSandbox, newCode, ct);
+
+        string srcSource = Path.Combine(sourceDir, "src");
+        string srcDest = Path.Combine(destDir, "src");
+        
+        if (Directory.Exists(srcSource))
+        {
+            Directory.CreateDirectory(srcDest);
+            foreach (string file in Directory.GetFiles(srcSource, "*.rs", SearchOption.AllDirectories))
+            {
+                string relPath = Path.GetRelativePath(srcSource, file);
+                string destFile = Path.Combine(srcDest, relPath);
+                
+                if (Path.GetFullPath(destFile) == Path.GetFullPath(targetFileInSandbox)) continue;
+
+                string? dDir = Path.GetDirectoryName(destFile);
+                if (!string.IsNullOrEmpty(dDir)) Directory.CreateDirectory(dDir);
+                
+                File.Copy(file, destFile, true);
+            }
+        }
     }
 
     private CodeValidationResult ParseCargoErrors(string rawJson, string code)
@@ -160,7 +210,6 @@ public class DockerValidationService : ICodeValidator
                         }
 
                         issues.Add(new ValidationIssue(level, message, lineNum, 0));
-                        
                         string clippyTag = string.IsNullOrEmpty(errorCode) ? "" : $" [{errorCode}]";
                         cleanErrorsLog.AppendLine($"[Line {lineNum}]{clippyTag} {message}");
                     }

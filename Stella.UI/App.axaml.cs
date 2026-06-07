@@ -33,6 +33,8 @@ public partial class App : Application
         
         services.AddSingleton<IProjectAnalyzer, RustProjectAnalyzer>();
 
+        services.AddSingleton<ProjectContextManager>();
+
         services.AddSingleton<MainWindowViewModel>();
         
         var serviceProvider = services.BuildServiceProvider();

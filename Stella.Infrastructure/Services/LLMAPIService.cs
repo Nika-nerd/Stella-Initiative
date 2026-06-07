@@ -29,32 +29,55 @@ public class LLMAPIService : ILLMService
 
     public async Task<string> GenerateCodeAsync(string prompt, int attempt = 1, double temperature = 0.0)
     {
-        string systemInstruction = 
-            "You are an automated Rust code generation agent. Your sole objective is to write production-grade, highly optimized, and sound Rust code based on user specifications.\n\n" +
+        string baseInstruction = 
+            "You are an automated Rust code generation agent. Your sole objective is to write production-grade, highly optimized, and sound Rust code based on user specifications.\n" +
             "=== COMPILATION & QUALITY REQUIREMENTS ===\n" +
             "1. ZERO ERRORS: Code must strictly compile via rustc, pass all clippy lints (pedantic), and satisfy the borrow checker.\n" +
             "2. DEPENDENCIES: Use ONLY the Rust Standard Library (std). No external crates are allowed unless specified.\n" +
-            "3. TESTING: Always include a `mod tests` block with comprehensive `#[test]` functions at the bottom of the code.\n\n" +
+            "3. TESTING: Always include a `mod tests` block with comprehensive `#[test]` functions at the bottom of the code.\n" +
             "=== NO COMMENTS RULE ===\n" +
-            "4. ABSOLUTELY NO CODE COMMENTS: Do not write ANY comments (neither `//` nor `/* */`) inside the Rust code block. The code must be self-explanatory and completely clean of inline natural language notes or explanations.\n\n" +
-            "=== RESPONSE STRUCTURE FORMAT ===\n" +
-            "Your response MUST follow this exact layout:\n\n" +
-            "[ANALYSIS & PLANNING]\n" +
-            "Provide a brief, high-level structural plan or explanation of fixes here in plain English text. Do not use any code blocks in this section.\n\n" +
-            "[CODE BLOCK]\n" +
-            "Provide the complete, executable Rust code inside exactly one markdown block starting with ```rust and ending with ```.\n" +
-            "CRITICAL: Keep the interior of the ```rust block completely clean—no natural language, NO COMMENTS, no trailing explanations, and no placeholders.";
+            "4. ABSOLUTELY NO CODE COMMENTS: Do not write ANY comments inside the Rust code block. The code must be self-explanatory.\n";
+
+        string formattingInstruction;
+        int maxTokens;
+
+        if (attempt == 1)
+        {
+            formattingInstruction = 
+                "=== RESPONSE STRUCTURE FORMAT ===\n" +
+                "Your response MUST follow this exact layout:\n\n" +
+                "[ANALYSIS & PLANNING]\n" +
+                "Provide a brief, high-level structural plan of your solution here in plain English text. No code blocks.\n\n" +
+                "[CODE BLOCK]\n" +
+                "Provide the complete, executable Rust code inside exactly one markdown block starting with ```rust and ending with ```.";
+            maxTokens = 6144; 
+        }
+        else
+        {
+           
+            formattingInstruction = 
+                "=== CRITICAL DIRECTIVE FOR BUG-FIXING ATTEMPT ===\n" +
+                "This is a correction attempt. DO NOT output [ANALYSIS & PLANNING] section.\n" +
+                "Your output must contain ONLY the [CODE BLOCK] section. Go straight to the ```rust block.";
+            maxTokens = 4096;
+        }
+
+        string fullSystemInstruction = baseInstruction + formattingInstruction;
 
         var requestBody = new
         {
+            systemInstruction = new
+            {
+                parts = new[] { new { text = fullSystemInstruction } }
+            },
             contents = new[]
             {
-                new { parts = new[] { new { text = $"System instruction:\n{systemInstruction}\n\nUser task:\n{prompt}" } } }
+                new { parts = new[] { new { text = prompt } } }
             },
             generationConfig = new
             {
                 temperature = temperature,
-                maxOutputTokens = 8192
+                maxOutputTokens = maxTokens
             }
         };
 
@@ -68,7 +91,7 @@ public class LLMAPIService : ILLMService
                 var content = new StringContent(JsonSerializer.Serialize(requestBody), Encoding.UTF8, "application/json");
                 var response = await _httpClient.PostAsync(requestUrl, content);
 
-                if (((int)response.StatusCode == 503 || (int)response.StatusCode == 429) && i < maxApiRetries - 1)
+                if (((int)response.StatusCode == 429 || (int)response.StatusCode == 503) && i < maxApiRetries - 1)
                 {
                     int delay = (int)Math.Pow(2, i + 1) * 1000; 
                     await Task.Delay(delay);

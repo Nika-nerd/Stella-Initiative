@@ -18,96 +18,131 @@ public class NativeValidationService : ICodeValidator
     public string TargetRelativeFilePath { get; set; } = "src/main.rs";
 
     public async Task<CodeValidationResult> ValidateAsync(string code, CancellationToken ct = default)
+{
+    bool isProjectMode = !string.IsNullOrEmpty(TargetCargoTomlPath) && File.Exists(TargetCargoTomlPath);
+    
+    string homeDir = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+    string temporarySandbox = Path.Combine(homeDir, ".stella_tmp", "validation", Guid.NewGuid().ToString());
+    Directory.CreateDirectory(temporarySandbox);
+
+    try
     {
-        string homeDir = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-        string tempDir = Path.Combine(homeDir, ".stella_tmp", "native", Guid.NewGuid().ToString());
-        Directory.CreateDirectory(tempDir);
-
-        try
+        if (isProjectMode)
         {
-            await PrepareCargoProject(tempDir, code, ct);
-
-            string cargoPath = Path.Combine(homeDir, ".cargo", "bin", OperatingSystem.IsWindows() ? "cargo.exe" : "cargo");
-            if (!File.Exists(cargoPath)) 
-            {
-                cargoPath = OperatingSystem.IsWindows() ? "cargo.exe" : "cargo";
-            }
-
-            var clippyInfo = new ProcessStartInfo
-            {
-                FileName = cargoPath,
-                Arguments = "clippy --message-format=json --all-targets -- -W warnings -W clippy::pedantic",
-                WorkingDirectory = tempDir,
-                RedirectStandardOutput = true,
-                RedirectStandardError = false, 
-                UseShellExecute = false,
-                CreateNoWindow = true
-            };
-
-            using var clippyProcess = Process.Start(clippyInfo);
-            if (clippyProcess == null)
-                return new CodeValidationResult(false, "Cargo start failed", new() { new("error", "Cargo not found.", null, null) }, code);
-
-            string clippyOutput = await clippyProcess.StandardOutput.ReadToEndAsync(ct);
-            await clippyProcess.WaitForExitAsync(ct);
-
-            var result = ParseCargoErrors(clippyOutput, code);
-            if (!result.IsSuccess) return result; 
-
-            var testInfo = new ProcessStartInfo
-            {
-                FileName = cargoPath,
-                Arguments = "test --message-format=json",
-                WorkingDirectory = tempDir,
-                RedirectStandardOutput = true,
-                RedirectStandardError = false, 
-                UseShellExecute = false,
-                CreateNoWindow = true
-            };
-
-            using var testProcess = Process.Start(testInfo);
-            if (testProcess != null)
-            {
-                string testOutput = await testProcess.StandardOutput.ReadToEndAsync(ct);
-                await testProcess.WaitForExitAsync(ct);
-                result = ParseTestResults(testOutput, result, code);
-            }
-
-            return result;
+            string projectSrcDir = Path.GetDirectoryName(Path.GetFullPath(TargetCargoTomlPath!))!;
+            await CopyProjectStructureAsync(projectSrcDir, temporarySandbox, code, ct);
         }
-        catch (Exception ex)
+        else
         {
-            return new CodeValidationResult(false, ex.Message, new() { new("error", ex.Message, null, null) }, code);
+            await PrepareTemporaryCargoProject(temporarySandbox, code, ct);
         }
-        finally
+
+        string cargoCmd = "cargo";
+
+        var clippyInfo = new ProcessStartInfo
         {
-            if (Directory.Exists(tempDir))
-            {
-                try { Directory.Delete(tempDir, true); } catch { }
-            }
+            FileName = cargoCmd,
+            Arguments = "clippy --message-format=json --all-targets -- -W warnings -W clippy::pedantic",
+            WorkingDirectory = temporarySandbox,
+            RedirectStandardOutput = true,
+            UseShellExecute = false,
+            CreateNoWindow = true
+        };
+
+        var testInfo = new ProcessStartInfo
+        {
+            FileName = cargoCmd,
+            Arguments = "test --message-format=json",
+            WorkingDirectory = temporarySandbox,
+            RedirectStandardOutput = true,
+            UseShellExecute = false,
+            CreateNoWindow = true
+        };
+
+        using var clippyProcess = Process.Start(clippyInfo);
+        using var testProcess = Process.Start(testInfo);
+
+        if (clippyProcess == null || testProcess == null)
+            return new CodeValidationResult(false, "Process start failed", new(), code);
+
+        Task<string> clippyTask = clippyProcess.StandardOutput.ReadToEndAsync(ct);
+        Task<string> testTask = testProcess.StandardOutput.ReadToEndAsync(ct);
+
+        await Task.WhenAll(clippyTask, testTask, clippyProcess.WaitForExitAsync(ct), testProcess.WaitForExitAsync(ct));
+
+        var clippyResult = ParseCargoErrors(clippyTask.Result, code);
+        var finalResult = ParseTestResults(testTask.Result, clippyResult, code);
+
+        return finalResult;
+    }
+    catch (Exception ex)
+    {
+        return new CodeValidationResult(false, ex.Message, new() { new("error", $"Native validator crashed: {ex.Message}", null, null) }, code);
+    }
+    finally
+    {
+        if (Directory.Exists(temporarySandbox))
+        {
+            try { Directory.Delete(temporarySandbox, true); } catch { }
         }
     }
+}
+public async Task ApplyChangesAsync(string code, CancellationToken ct = default)
+{
+    if (string.IsNullOrEmpty(TargetCargoTomlPath)) return;
+    
+    string projectDir = Path.GetDirectoryName(Path.GetFullPath(TargetCargoTomlPath))!;
+    string fullTargetFilePath = Path.Combine(projectDir, TargetRelativeFilePath);
+    
+    string? fileDir = Path.GetDirectoryName(fullTargetFilePath);
+    if (!string.IsNullOrEmpty(fileDir)) Directory.CreateDirectory(fileDir);
+    
+    await File.WriteAllTextAsync(fullTargetFilePath, code, ct);
+}
 
-    private async Task PrepareCargoProject(string path, string code, CancellationToken ct)
+private async Task CopyProjectStructureAsync(string sourceDir, string destDir, string newCode, CancellationToken ct)
+{
+    string cargoToml = Path.Combine(sourceDir, "Cargo.toml");
+    if (File.Exists(cargoToml))
     {
-        string cargoTomlContent = "[package]\nname = 'stella_temp'\nversion = '0.1.0'\nedition = '2021'\n\n[dependencies]\n";
-        if (!string.IsNullOrEmpty(TargetCargoTomlPath) && File.Exists(TargetCargoTomlPath))
-        {
-            cargoTomlContent = await File.ReadAllTextAsync(TargetCargoTomlPath, ct);
-            if (cargoTomlContent.Contains("name ="))
-            {
-                cargoTomlContent = System.Text.RegularExpressions.Regex.Replace(cargoTomlContent, @"name\s*=\s*""[^""]+""", "name = \"stella_temp\"");
-            }
-        }
+        File.Copy(cargoToml, Path.Combine(destDir, "Cargo.toml"), true);
+    }
 
+    string targetFileInSandbox = Path.Combine(destDir, TargetRelativeFilePath);
+    string? sandboxFileDir = Path.GetDirectoryName(targetFileInSandbox);
+    if (!string.IsNullOrEmpty(sandboxFileDir)) Directory.CreateDirectory(sandboxFileDir);
+    
+    await File.WriteAllTextAsync(targetFileInSandbox, newCode, ct);
+
+    string srcSource = Path.Combine(sourceDir, "src");
+    string srcDest = Path.Combine(destDir, "src");
+    
+    if (Directory.Exists(srcSource))
+    {
+        Directory.CreateDirectory(srcDest);
+        foreach (string file in Directory.GetFiles(srcSource, "*.rs", SearchOption.AllDirectories))
+        {
+            string relPath = Path.GetRelativePath(srcSource, file);
+            string destFile = Path.Combine(srcDest, relPath);
+            
+            if (Path.GetFullPath(destFile) == Path.GetFullPath(targetFileInSandbox)) continue;
+
+            string? dDir = Path.GetDirectoryName(destFile);
+            if (!string.IsNullOrEmpty(dDir)) Directory.CreateDirectory(dDir);
+            
+            File.Copy(file, destFile, true);
+        }
+    }
+}
+
+    private async Task PrepareTemporaryCargoProject(string path, string code, CancellationToken ct)
+    {
+        string cargoTomlContent = "[package]\nname = 'stella_temp_native'\nversion = '0.1.0'\nedition = '2021'\n\n[dependencies]\n";
         await File.WriteAllTextAsync(Path.Combine(path, "Cargo.toml"), cargoTomlContent, ct);
 
         string fullTargetFilePath = Path.Combine(path, TargetRelativeFilePath);
         string? directoryPath = Path.GetDirectoryName(fullTargetFilePath);
-        if (!string.IsNullOrEmpty(directoryPath))
-        {
-            Directory.CreateDirectory(directoryPath);
-        }
+        if (!string.IsNullOrEmpty(directoryPath)) Directory.CreateDirectory(directoryPath);
 
         await File.WriteAllTextAsync(fullTargetFilePath, code, ct);
     }
@@ -122,7 +157,7 @@ public class NativeValidationService : ICodeValidator
         var lines = rawJson.Split('\n', StringSplitOptions.RemoveEmptyEntries);
         foreach (var line in lines)
         {
-            try 
+            try
             {
                 using var doc = JsonDocument.Parse(line);
                 var root = doc.RootElement;
@@ -131,12 +166,12 @@ public class NativeValidationService : ICodeValidator
                 {
                     var messageNode = root.GetProperty("message");
                     string level = messageNode.GetProperty("level").GetString() ?? "warning";
-                    
+
                     if (level.ToLower() == "error" || level.ToLower() == "deny")
                     {
                         string message = messageNode.GetProperty("message").GetString() ?? "";
                         int? lineNum = null;
-                        
+
                         if (messageNode.TryGetProperty("spans", out var spans) && spans.GetArrayLength() > 0)
                         {
                             var firstSpan = spans[0];
@@ -145,7 +180,7 @@ public class NativeValidationService : ICodeValidator
                                 lineNum = lineProp.GetInt32();
                             }
                         }
-                        
+
                         string errorCode = "";
                         if (messageNode.TryGetProperty("code", out var codeProp) && codeProp.ValueKind != JsonValueKind.Null)
                         {
@@ -156,7 +191,6 @@ public class NativeValidationService : ICodeValidator
                         }
 
                         issues.Add(new ValidationIssue(level, message, lineNum, 0));
-                        
                         string clippyTag = string.IsNullOrEmpty(errorCode) ? "" : $" [{errorCode}]";
                         cleanErrorsLog.AppendLine($"[Line {lineNum}]{clippyTag} {message}");
                     }
@@ -193,7 +227,7 @@ public class NativeValidationService : ICodeValidator
                             isSuccess = false;
                             string name = testName.GetString() ?? "unknown";
                             string stdout = root.TryGetProperty("stdout", out var outProp) ? outProp.GetString() ?? "" : "";
-                            
+
                             issues.Add(new ValidationIssue("error", $"Test '{name}' failed.", null, null));
                             testLog.AppendLine($"[Test Failed] '{name}'\nLog: {stdout}");
                         }
